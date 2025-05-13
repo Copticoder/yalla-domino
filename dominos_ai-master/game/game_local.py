@@ -12,12 +12,12 @@ from env.PlayGame import PlayGame
 
 
 def parseParams():
-    """解析命令行参数"""
+    """Parse command line parameters"""
     parser = argparse.ArgumentParser()
     parser.add_argument('-save_record', type=str, help='save game records or not', default=None)
     parser.add_argument('-game_num', type=int, help='game times', default=100)
-    parser.add_argument('-policy1_config', type=str, help='策略配置文件', default=None)
-    parser.add_argument('-policy2_config', type=str, help='策略配置文件', default=None)
+    parser.add_argument('-policy1_config', type=str, help='Policy configuration file', default=None)
+    parser.add_argument('-policy2_config', type=str, help='Policy configuration file', default=None)
     parser.add_argument('-print_details', action='store_true', help='print vs process or not')
     args = parser.parse_args()
     return args
@@ -38,9 +38,9 @@ if __name__ == '__main__':
         first_move.append(t_sign)
         game_result.append(round_win_type)
 
-    print("Player1先手概率：", sum([m > 0 for m in first_move]) / params.game_num)
-    print("Player1获胜概率：", sum([g > 0 for g in game_result if g != 0]) / sum([1 for g in game_result if g != 0]))
-    print("Player1获胜均分：", sum([g for g in game_result if g > 0]) / sum([1 for g in game_result if g != 0]))
-    print("Player1失败均分：", sum([g for g in game_result if g < 0]) / sum([1 for g in game_result if g != 0]))
+    print("Player1 first move probability:", sum([m > 0 for m in first_move]) / params.game_num)
+    print("Player1 win probability:", sum([g > 0 for g in game_result if g != 0]) / sum([1 for g in game_result if g != 0]))
+    print("Player1 average winning score:", sum([g for g in game_result if g > 0]) / sum([1 for g in game_result if g != 0]))
+    print("Player1 average losing score:", sum([g for g in game_result if g < 0]) / sum([1 for g in game_result if g != 0]))
     if len(model_action_rank) > 0:
-        print("model出牌合理性（越低越好）:", sum(model_action_rank) / len(model_action_rank))
+        print("Model card playing rationality (the lower the better):", sum(model_action_rank) / len(model_action_rank))

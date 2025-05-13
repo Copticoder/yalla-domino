@@ -134,7 +134,7 @@ def get_validate_act(now_board, now_hand, is_start_round=False):
                         "inverse": 3
                     }
                 )
-            # 同点牌，同侧，动作空间不必重复添加
+            # Double card, same side, action space does not need to be added repeatedly
             if card[0] == board_head and card[0] != card[1]:
                 actions.append(
                     {
@@ -143,7 +143,7 @@ def get_validate_act(now_board, now_hand, is_start_round=False):
                         "inverse": 4
                     }
                 )
-            # board左、右点相同
+            # Board left and right points are the same
             if board_head == board_tail:
                 continue
 
@@ -155,7 +155,7 @@ def get_validate_act(now_board, now_hand, is_start_round=False):
                         "inverse": 3
                     }
                 )
-            # 同点牌，同侧，动作空间不必重复添加
+            # Double card, same side, action space does not need to be added repeatedly
             if card[1] == board_tail and card[1] != card[0]:
                 actions.append(
                     {
