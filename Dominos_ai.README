@@ -1,0 +1,22 @@
+Since this work has been carried out intermittently, I have not written the code in a very standardized way. Here is a simple readme.
+
+# The environment is easy to install ,just pip install the lacking packages the ide tells you.
+# each json files in ./configs is a strategy. human means that you can play a game vs other strategies with command lines.
+# eg. The state is as follow:
+# --------------------------------------------------
+# Player1 手牌: [[1, 1], [0, 0], [0, 1], [2, 3], [2, 6]]
+# Player2 手牌: 2
+# Board: [[3, 5], [5, 5], [5, 4], [4, 0], [0, 5], [5, 2], [2, 2], [2, 4], [4, 3], [3, 3], [3, 6], [6, 5], [5, 1], [1, 4], [4, 6], [6, 6]]
+#Stock: 5
+# --------------------------------------------------
+# 选择你要出的牌、位置：左侧3，右侧4，输入：卡牌@位置，如[3, 3]@3
+# [2, 6]@4
+# [2, 6] is one of your cards. @3 means that you want to the card next to the left side of the Board. @4 means the right side.
+
+# game/game_local.py monitors a game between strategies. you can use the following command to play with a SLModel policy.
+# also you can change different strategies by change the config file.
+python game/game_local.py -policy1_config ./configs/human.json -policy2_config ./configs/SLModel.json -game_num 1000 -print_details
+
+# ./dominos_ai/TrainSLModel.py is the SLModel implement.The model predicts the action scores under states. Training samples are from ramdom vs ramdom, random select a state and the final score is the regression target.
+
+./dominos_ai/TrainActionAndStateValueModel.py is not finished, so it may not work.

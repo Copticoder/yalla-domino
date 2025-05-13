@@ -1,0 +1,11 @@
+{
+  "policy": "MCTS",
+  "MCTS_policy": {
+    "policy": "SLModel",
+    "model_type": "SLModel",
+    "weights": "./weights/RewardMSE.pth"
+  },
+  "simu_policy": {
+    "policy": "random"
+  }
+}
