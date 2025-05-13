@@ -31,14 +31,14 @@ card_map = {
     '5-6': 28,
     '6-6': 7
 }
-# python3.6后key保序，可不用OrderedDict
+# In python3.6+, keys are ordered, OrderedDict is not necessary
 card_map = OrderedDict(card_map)
 
 card_map_inv = {card_map[k]: k for k in card_map}
 
 
 def card_str_to_list(card_str):
-    """list类型的card"""
+    """Card of type list"""
     return [int(card_str[0]), int(card_str[-1])]
 
 
@@ -47,18 +47,18 @@ def card_list_to_str(card_list):
 
 
 def convert_card_to_index(card):
-    """将卡牌转化为index"""
+    """Convert card to index"""
     return card_map[card_list_to_str(card)]
 
 
 def convert_index_to_card(index):
-    """将index转化为卡牌"""
+    """Convert index to card"""
     card = card_map_inv[index]
     return card_str_to_list(card)
 
 
 def convert_action_to_index(action):
-    """将出牌动作转化为index"""
+    """Convert card playing action to index"""
     card_idx = convert_card_to_index(action['card'])
     if action['direction'] == 4:
         card_idx += len(card_map)
@@ -66,27 +66,27 @@ def convert_action_to_index(action):
 
 
 def convert_index_to_action(index):
-    """将index转化为出牌动作"""
+    """Convert index to card playing action"""
     return {'direction': 3 if index <= len(card_map) else 4,
             'card': convert_index_to_card(index if index <= len(card_map) else index - len(card_map))}
 
 
-# 动作合法性判断：return 3、4 合法，return 0 非法
+# Action legality judgment: return 3, 4 for legal, return 0 for illegal
 def domino_critics(now_board, play_card, play_direction):
     if not now_board:
         return 3
-    # board左侧
+    # Left side of board
     if play_direction == 3:
-        # 出牌翻转是否能匹配
+        # Can it match if the card is flipped?
         if now_board[0][0] == play_card[1]:
             return 3
         elif now_board[0][0] == play_card[0]:
             return 4
         else:
             return 0
-    # board右侧
+    # Right side of board
     elif play_direction == 4:
-        # 出牌翻转是否能匹配
+        # Can it match if the card is flipped?
         if now_board[-1][-1] == play_card[0]:
             return 3
         elif now_board[-1][-1] == play_card[1]:
@@ -97,16 +97,16 @@ def domino_critics(now_board, play_card, play_direction):
         raise ValueError("Undefined direction")
 
 
-# 获取合法动作空间：[[牌、是否需要翻转、左侧/右侧添加]]
-# 是否需要翻转：不翻转3，翻转4
-# 左侧 / 右侧添加：左侧3，右侧4
+# Get legal action space: [[card, whether to flip, add to left/right side]]
+# Whether to flip: 3 for no flip, 4 for flip
+# Add to left/right side: 3 for left, 4 for right
 def get_validate_act(now_board, now_hand, is_start_round=False):
     actions = []
     if not now_board:
-        # 第一轮、第一次出牌必须为最大同点牌
+        # First round, first card played must be the largest double
         if is_start_round:
             card = max([[x, y] for x, y in now_hand if x == y])
-            # 最大同点牌、默认翻转、默认侧
+            # Largest double, default flip, default side
             actions.append(
                 {
                     "card": card,
@@ -169,7 +169,7 @@ def get_validate_act(now_board, now_hand, is_start_round=False):
 
 
 def guess_op_and_stock_cards(hand, board, op_num):
-    """猜测对手和牌库手牌"""
+    """Guess opponent and stock hand cards"""
     board_sorted = [[min(b), max(b)] for b in board]
     left_cards = [card_str_to_list(c) for c in card_map if
                   card_str_to_list(c) not in hand and card_str_to_list(c) not in board_sorted]

@@ -6,9 +6,9 @@ class HumanPolicy(BasePolicy):
     def __init__(self, **kwargs):
         super(HumanPolicy, self).__init__()
 
-    # 手动输入
+    # Manual input
     def play(self, **kwargs):
-        # 输入合法性判断
+        # Input legality judgment
         def human_input_critics(inp, hand_pieces):
             try:
                 inp_card, inp_direction = inp.split("@")
@@ -25,7 +25,7 @@ class HumanPolicy(BasePolicy):
 
         if len(self.validate_actions) > 1:
             while True:
-                print("选择你要出的牌、位置：左侧3，右侧4，输入：卡牌@位置，如[3, 3]@3")
+                print("Choose the card you want to play and its position: 3 for left, 4 for right. Input: card@position, e.g., [3, 3]@3")
                 user_inp = input()
                 if not human_input_critics(user_inp, self.state['hand']):
                     continue
@@ -44,5 +44,5 @@ class HumanPolicy(BasePolicy):
             return self.validate_actions[0]
 
     def type(self):
-        """策略类型"""
+        """Policy type"""
         return "human"

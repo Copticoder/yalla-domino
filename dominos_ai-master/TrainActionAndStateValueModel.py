@@ -17,9 +17,9 @@ from utils import parse_config
 from models.ActionAndStateValueModel import parseStateAsModelInput, ActionAndStateValueModel
 
 """
-dominos出牌网络，监督学习进行基础下棋能力训练。
-模型输出：a_t,v_t = f(s_t)
-a_t用于出牌，v_t用于MCTS
+dominos card playing network, supervised learning for basic chess playing ability training.
+Model output: a_t,v_t = f(s_t)
+a_t is used for playing cards, v_t is used for MCTS
 """
 
 
@@ -30,7 +30,7 @@ class ValueActionLoss(torch.nn.Module):
         super().__init__()
 
     def forward(self, pred_actions, pred_values, targets, rewards):
-        """计算loss"""
+        """Calculate loss"""
         value_loss = torch.nn.functional.mse_loss(pred_values, rewards)
         action_loss = torch.nn.functional.cross_entropy(pred_actions, torch.where(targets > 0, 1, 0).squeeze())
         return value_loss + action_loss
@@ -46,7 +46,7 @@ class DataLoaderX(DataLoader):
 
 
 def collate_function(data):
-    """处理批量数据"""
+    """Process batch data"""
     states_np = np.zeros([len(data), data[0][0].shape[0]], dtype=np.int64)
     targets_np = np.zeros([len(data), 1], dtype=np.int64)
     rewards_np = np.zeros([len(data), 1], dtype=np.float32)
@@ -60,11 +60,11 @@ def collate_function(data):
 
 class DominoDataset(dataset.Dataset):
     """
-    模拟随机对局产生State,Action
+    Simulate random games to generate State, Action
     """
 
     def __init__(self, player1_configs, player2_configs, data_max_gen=10000000):
-        "加载record_file,每行为一个s_t,a_t,r_t"
+        "Load record_file, each line is an s_t,a_t,r_t"
         self.data_max_gen = data_max_gen
         p1 = init_policy(player1_configs)
         p2 = init_policy(player2_configs)
@@ -74,7 +74,7 @@ class DominoDataset(dataset.Dataset):
         return self.data_max_gen
 
     def sample_random(self, ):
-        """随机采集一条记录,返回S_t,A_t,R"""
+        """Randomly collect a record, return S_t,A_t,R"""
         while 1:
             t_sign, round_win_type, play_traces = self.g.run_game()
             if round_win_type == 0:
@@ -95,27 +95,27 @@ class DominoDataset(dataset.Dataset):
             return parseStateAsModelInput(state), target - 1, R
 
     def __getitem__(self, index):
-        """将记录解析为训练数据"""
+        """Parse the record into training data"""
         return self.sample_random()
 
 
 def train(dataLoader, epoch_num=10, save_path="./weights/", pretrain=None, device='cpu'):
-    """训练"""
-    # 加载模型
+    """Train"""
+    # Load model
     model = ActionAndStateValueModel(device=device)
     if pretrain is not None:
         model.load_state_dict(torch.load(pretrain))
     if model.device == 'cuda':
         model.cuda()
 
-    # 定义优化器
+    # Define optimizer
     optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9, weight_decay=5e-4)
-    # 定义学习率策略
+    # Define learning rate strategy
     lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epoch_num, eta_min=1e-6)
-    # 定义损失函数
+    # Define loss function
     loss_func = ValueActionLoss()
     gradScaler = GradScaler(enabled=model.device == 'cuda')
-    # 训练epochs
+    # Training epochs
     for epoch in range(epoch_num):
         print("start epoch {}".format(epoch))
         loop = tqdm.tqdm(dataLoader, total=len(dataLoader))
@@ -138,12 +138,12 @@ def train(dataLoader, epoch_num=10, save_path="./weights/", pretrain=None, devic
 
             loop.set_postfix(epoch=epoch, loss="{:.6f}".format(loss.item()), lr=optimizer.param_groups[0]['lr'])
         lr_scheduler.step()
-        # 保存模型
+        # Save model
         torch.save(model.state_dict(), os.path.join(save_path, "params_epoch{}.pth".format(epoch)))
 
 
 def parseParams():
-    """解析命令行参数"""
+    """Parse command line parameters"""
     parser = argparse.ArgumentParser()
     parser.add_argument('-save_path', type=str, help='model save path.', default=None)
     parser.add_argument('-epoch', type=int, help='train epoch num', default=10)
@@ -151,8 +151,8 @@ def parseParams():
     parser.add_argument('-batch_size', type=int, help='train epoch num', default=1024)
     parser.add_argument('-train_game_num', type=int, help='train game num', default=10000000)
     parser.add_argument('-pretrain', type=str, help='pretrain model path', default=None)
-    parser.add_argument('-policy1_config', type=str, help='策略配置文件', default=None)
-    parser.add_argument('-policy2_config', type=str, help='策略配置文件', default=None)
+    parser.add_argument('-policy1_config', type=str, help='Policy configuration file', default=None)
+    parser.add_argument('-policy2_config', type=str, help='Policy configuration file', default=None)
     args = parser.parse_args()
     return args
 
@@ -164,7 +164,7 @@ if __name__ == "__main__":
     if params.task == 'train':
         if not os.path.exists(params.save_path):
             os.makedirs(params.save_path)
-            # 加载数据集
+            # Load dataset
         domino_dataset = DominoDataset(data_max_gen=params.train_game_num,
                                        player1_configs=parse_config(params.policy1_config),
                                        player2_configs=parse_config(params.policy2_config))

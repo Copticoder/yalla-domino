@@ -5,10 +5,10 @@ from env.utils import get_validate_act, convert_action_to_index
 
 
 class PlayGame:
-    """玩游戏"""
+    """Play game"""
 
     def __init__(self, Policy1, Policy2, print_details=False, **kwargs):
-        # 打印游戏信息
+        # Print game information
         self.print_details = print_details
 
         self.Policy1 = Policy1
@@ -18,15 +18,15 @@ class PlayGame:
 
     def get_state_info(self, game_state):
         """
-        打印对局信息
+        Print game information
         :param game_state:
         """
         if not self.print_details:
             return
         print("-" * 50)
-        print("Player1 手牌:",
+        print("Player1 Hand:",
               len(game_state.player_pieces) if self.Policy2.type() == 'human' else game_state.player_pieces)
-        print("Player2 手牌:",
+        print("Player2 Hand:",
               len(game_state.opponent_pieces) if self.Policy1.type() == 'human' else game_state.opponent_pieces)
         print("Board:", game_state.board_pieces)
         if self.Policy1.type() != 'human' and self.Policy2.type() != 'human':
@@ -37,7 +37,7 @@ class PlayGame:
 
     def get_init_info(self):
         """
-        打印对局初始化信息
+        Print game initialization information
         :param game_state:
         """
         if not self.print_details:
@@ -46,24 +46,24 @@ class PlayGame:
 
     def print_final_info(self, round_win_score):
         """
-        打印对局结束信息
+        Print game end information
         :param:
         """
         if not self.print_details:
             return
         if round_win_score > 0:
-            print("本轮游戏结束，Player1赢了～, 得分", round_win_score)
+            print("This round is over, Player1 wins~, score", round_win_score)
         elif round_win_score < 0:
-            print("本轮游戏结束，Player2赢了～, 得分", round_win_score)
+            print("This round is over, Player2 wins~, score", round_win_score)
         else:
-            print("平局.")
+            print("Draw.")
 
         print("#" * 25 + "Game Ended" + "#" * 25)
 
     def run_game(self):
-        """进行一次对局"""
+        """Play a game"""
         self.get_init_info()
-        # 以 1/4 的概率生成round 1对局
+        # Generate round 1 game with 1/4 probability
         is_start_round = random.random() > 0.75
         p_pieces, o_pieces, s_pieces, b_pieces, t_sign = GameStart().game_init(is_start_round=is_start_round)
         round_monitor = DominoMonitor(
@@ -73,7 +73,7 @@ class PlayGame:
             board_pieces=b_pieces,
             turn_sign=t_sign
         )
-        # 初始状态
+        # Initial state
         self.get_state_info(round_monitor)
 
         play_traces = {
@@ -107,25 +107,25 @@ class PlayGame:
                 play_traces['A_t'].append(convert_action_to_index(round_act))
 
             round_win_type = round_monitor.act_state_update(round_act)
-            # 打印局面信息
+            # Print board information
             self.get_state_info(round_monitor)
-            # 统计模型出牌top1是否符合规则
+            # Count whether the top1 card played by the model conforms to the rules
             if 'rank' in round_act:
                 self.model_action_rank.append(round_act['rank'])
 
-            # 判断当局游戏是否结束
+            # Judge whether the current game is over
             if round_win_type is None:
                 continue
 
-            # 补充奖励
+            # Supplement rewards
             for i in range(len(play_traces['P'])):
                 if play_traces['P'][i] > 0:
-                    # player 1 的奖励
+                    # Player 1's reward
                     play_traces['R'].append(round_win_type)
                 else:
-                    # player 2 的奖励
+                    # Player 2's reward
                     play_traces['R'].append(-round_win_type)
             self.print_final_info(round_win_type)
             break
-        # 返回 先手次序,胜者分,出牌记录
+        # Return starting order, winner's score, play record
         return t_sign, round_win_type, play_traces

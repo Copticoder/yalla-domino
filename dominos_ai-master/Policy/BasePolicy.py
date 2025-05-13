@@ -1,5 +1,5 @@
 class BasePolicy:
-    """基础策略"""
+    """Base policy"""
 
     def __init__(self, **kwargs):
         self.validate_actions = None
@@ -7,7 +7,7 @@ class BasePolicy:
         self.is_start_round = None
 
     def update_state(self, now_hand, now_board, opponent_num, stock_num, validate_actions, is_start_round):
-        """更新当前state        """
+        """Update current state        """
         self.validate_actions = validate_actions.copy()
         self.state = {
             "hand": now_hand.copy(),
@@ -18,9 +18,9 @@ class BasePolicy:
         self.is_start_round = is_start_round
 
     def play(self):
-        """出牌"""
+        """Play card"""
         pass
 
     def type(self):
-        """策略类型"""
+        """Policy type"""
         return "Base"

@@ -1,7 +1,7 @@
 from collections import defaultdict
 
 
-# 游戏环境模拟器
+# Game environment simulator
 class DominoMonitor:
     def __init__(self, player_pieces, opponent_pieces, stock_pieces, board_pieces, turn_sign):
         self.player_pieces = player_pieces
@@ -10,10 +10,10 @@ class DominoMonitor:
         self.board_pieces = board_pieces
         self.turn_sign = turn_sign
 
-        # 当前操作对象
+        # Current operating object
         self.agent_pieces = self.player_pieces if self.turn_sign > 0 else self.opponent_pieces
 
-        # 初始化点数计数器
+        # Initialize point counter
         self.card_count = defaultdict(int)
         for x, y in self.board_pieces:
             self.card_count[x] += 1
@@ -28,91 +28,91 @@ class DominoMonitor:
         }
 
     def _win_condition(self):
-        # player没有手牌
+        # Player has no hand cards
         if not self.player_pieces:
-            # print("\n游戏结束. 你赢了!")
-            # print("你没有手牌了")
+            # print("\nGame over. You win!")
+            # print("You have no hand cards left")
             return sum([sum(val) for val in self.opponent_pieces])
 
-        # computer没有手牌
+        # Computer has no hand cards
         if not self.opponent_pieces:
-            # print("\n游戏结束. 对手赢了!")
-            # print("对手没有手牌了")
+            # print("\nGame over. Opponent wins!")
+            # print("Opponent has no hand cards left")
             return -sum([sum(val) for val in self.player_pieces])
 
-        # 头、尾的点牌已经耗尽
+        # The point cards at the head and tail have been exhausted
         if self.card_count.get(self.board_pieces[0][0]) == 8 and \
                 self.card_count.get(self.board_pieces[-1][-1]) == 8:
-            # print("无法继续接牌，比较点数大小")
-            # 结算
+            # print("Cannot continue to connect cards, compare point sizes")
+            # Settlement
             p_score = sum([sum(val) for val in self.player_pieces])
             c_score = sum([sum(val) for val in self.opponent_pieces])
             if p_score <= c_score:
-                # print("\n游戏结束，点数较小，你赢了!")
+                # print("\nGame over, points are smaller, you win!")
                 return c_score - p_score
             else:
-                # print("\n游戏结束，点数较小，对手赢了!")
+                # print("\nGame over, points are smaller, opponent wins!")
                 return -(p_score - c_score)
 
-        # 游戏继续
+        # Game continues
         return None
 
-    # 手牌是否有动作空间
+    # Whether the hand has action space
     def _hand_connect_sign(self, now_hand):
-        # 待连接点
+        # Points to be connected
         key_point = [self.board_pieces[0][0], self.board_pieces[-1][-1]]
-        # 手牌中满足出牌要求
+        # Hand meets the card playing requirements
         return any([point in key_point for card in now_hand for point in card])
 
-    # 根据出牌动作，更新游戏环境，不判断胜利条件
+    # Update the game environment according to the card playing action, without judging the victory condition
     def _update_states(self, act):
         act_card, act_direction, act_inverse = act["card"], act["direction"], act["inverse"]
-        # 从agent的手牌中删除
+        # Remove from agent's hand
         self.agent_pieces.remove(act_card)
-        # 判断是否翻转，添加到board
+        # Judge whether to flip, add to board
         inverse_card = act_card if act_inverse == 3 else act_card[::-1]
         if act_direction == 3:
             self.board_pieces.insert(0, inverse_card)
         else:
             self.board_pieces.append(inverse_card)
-        # 更新点数计数器
+        # Update point counter
         for v in act_card:
             self.card_count[v] += 1
 
-    # 输入动作，并更新游戏环境，判断游戏胜利条件
+    # Input action, update game environment, and judge game victory conditions
     def act_state_update(self, act=None):
-        # 无动作空间 并且 牌库为空：判断游戏是否结束
+        # No action space and stock is empty: judge whether the game is over
         if act is None and not self.stock_pieces:
-            # 交换出牌顺序
+            # Exchange turn order
             self.turn_sign *= -1
-            # 当前操作角色手牌
+            # Current operating role hand cards
             self.agent_pieces = self.player_pieces if self.turn_sign > 0 else self.opponent_pieces
             return self._win_condition()
 
-        # 有动作空间，根据act，更新游戏状态
+        # There is action space, update the game state according to act
         self._update_states(act)
 
-        # 出牌后手牌是否为空
+        # Whether the hand is empty after playing a card
         if not self.agent_pieces:
             return self._win_condition()
 
-        # 交换出牌顺序
+        # Exchange turn order
         self.turn_sign *= -1
-        # 当前操作角色手牌
+        # Current operating role hand cards
         self.agent_pieces = self.player_pieces if self.turn_sign > 0 else self.opponent_pieces
 
-        # 手牌无法连接board，并且牌库有牌
+        # Hand cannot connect to board, and stock has cards
         if not self._hand_connect_sign(self.agent_pieces) and self.stock_pieces:
-            # 持续发牌直到：能连接 或 牌库为空
+            # Continue to deal cards until: can connect or stock is empty
             while not self._hand_connect_sign(self.agent_pieces) and self.stock_pieces:
                 deal = self.stock_pieces.pop()
-                # print("补牌 + 1")
+                # print("Draw card + 1")
                 self.agent_pieces.append(deal)
 
-        # 判断发牌后是否能接牌，不能接牌交换
+        # Judge whether it can be connected after dealing cards, if not, exchange
         if not self._hand_connect_sign(self.agent_pieces):
             self.turn_sign *= -1
             self.agent_pieces = self.player_pieces if self.turn_sign > 0 else self.opponent_pieces
 
-        # 判断游戏是否结束
+        # Judge whether the game is over
         return self._win_condition()

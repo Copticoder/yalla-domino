@@ -5,22 +5,22 @@ from env.DominoMonitor import DominoMonitor
 
 class GameStart:
     """
-    开始游戏
+    Start game
     """
 
     def __init__(self):
-        # 基础domino
+        # Basic domino
         self.dominos = [[int(card[0]), int(card[2])] for card in card_map.keys()]
 
     def game_init(self, is_start_round=False):
-        # 随机打乱
+        # Shuffle randomly
         new_d = self.dominos.copy()
         while True:
             if is_start_round:
                 random.shuffle(new_d)
-                # 拆分骨牌：共28张牌
+                # Split dominoes: 28 tiles in total
                 start_stock_pieces, start_opponent_pieces, start_player_pieces = new_d[:14], new_d[14:21], new_d[21:]
-                # 特殊处理：发牌时必发双牌
+                # Special handling: double tiles must be dealt when dealing cards
                 p_double = [[x, y] for x, y in start_player_pieces if x == y]
                 o_double = [[x, y] for x, y in start_opponent_pieces if x == y]
                 if not p_double or not o_double:
@@ -35,7 +35,7 @@ class GameStart:
                     board_pieces=[],
                     turn_sign=1 if max_p_double[0] > max_o_double[0] else -1
                 )
-                # 走规则规定的第一步：更新游戏状态
+                # Take the first step specified by the rules: update the game state
                 start_game_state.act_state_update(
                     {
                         "card": max_p_double if max_p_double[0] > max_o_double[0] else max_o_double,
@@ -47,6 +47,6 @@ class GameStart:
                        start_game_state.stock_pieces, start_game_state.board_pieces, start_game_state.turn_sign
             else:
                 random.shuffle(new_d)
-                # 拆分骨牌：共28张牌
+                # Split dominoes: 28 tiles in total
                 start_stock_pieces, start_opponent_pieces, start_player_pieces = new_d[:14], new_d[14:21], new_d[21:]
                 return start_player_pieces, start_opponent_pieces, start_stock_pieces, [], random.choice([1, -1])

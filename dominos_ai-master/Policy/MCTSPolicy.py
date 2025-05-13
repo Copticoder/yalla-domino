@@ -18,8 +18,8 @@ class MCTSPolicy(BasePolicy):
         self.opponent_policy = opponent_policy
 
     def simulate(self):
-        """模拟"""
-        # 1.当前state建树根
+        """Simulate"""
+        # 1. Create a tree root with the current state
         root_data = {
             'state': self.state.copy(),
             'valid_actions': self.validate_actions.copy(),
@@ -29,7 +29,7 @@ class MCTSPolicy(BasePolicy):
         }
         tree = Tree()
         tree.create_node(identifier='root', data=root_data)
-        # 2.模拟
+        # 2. Simulate
         simu_time = 0
 
         while simu_time < 500:
@@ -79,11 +79,10 @@ class MCTSPolicy(BasePolicy):
                 simu_win_score = simu_monitor.act_state_update(round_act)
                 if simu_win_score is None:
                     continue
-                # 回溯奖励
+                # Backtrack reward
                 cur_node = tree.get_node(cur)
                 while cur_node.identifier != 'root':
                     cur_node.data['reward'] += simu_win_score
-                    cur_node = tree.parent(cur_node.identifier)
                 # print(tree)
                 break
             simu_time += 1
@@ -96,10 +95,10 @@ class MCTSPolicy(BasePolicy):
                 max_action = n.data['action']
         return max_action
 
-    # 使用出牌网络
+    # Use card playing network
     def play(self, **kwargs):
         """
-        使用策略网络出牌
+        Use policy network to play cards
         :param model:
         :return:
         """
@@ -109,5 +108,5 @@ class MCTSPolicy(BasePolicy):
             return self.validate_actions[0]
 
     def type(self):
-        """策略类型"""
+        """Policy type"""
         return "MCTS"

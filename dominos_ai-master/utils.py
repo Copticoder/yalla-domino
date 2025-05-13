@@ -3,7 +3,7 @@ import json
 
 def parse_config(config_json_file):
     """
-    解析标注config
+    Parse annotation config
     """
     with open(config_json_file, 'r') as f:
         configs = json.load(f)
