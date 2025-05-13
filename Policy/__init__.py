@@ -14,12 +14,12 @@ register_policy = {
 
 
 def get_policy(policy):
-    """返回policy"""
+    """Return policy"""
     return register_policy[policy]
 
 
 def init_policy(configs):
-    # 初始化策略
+    # Initialize policy
     p = get_policy(configs['policy'])(**configs)
     if p.type() == 'MCTS':
         p.init(get_policy(configs['MCTS_policy']['policy'])(**configs['MCTS_policy']),

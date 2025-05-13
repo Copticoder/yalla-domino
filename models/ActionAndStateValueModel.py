@@ -7,13 +7,13 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)) + "/../")
 from env.utils import card_map, convert_card_to_index
 
 """
-dominos出牌网络，学习规则。
-评估方式，看对局中top1的出牌，是否合法。
+Dominos card playing network, learning rules.
+Evaluation method, see if the top1 card played in the game is legal.
 """
 
 
 def parseStateAsModelInput(state):
-    """将记录解析为SLPolicyModel的网络输入"""
+    """Parse the record into the network input of SLPolicyModel"""
     hand = [convert_card_to_index(c) for c in state['hand']]
     hand.sort()
     hand += [0] * (21 - len(hand))
@@ -43,16 +43,16 @@ class ActionAndStateValueModel(torch.nn.Module):
         self.cards_total_num = 28
         self.cards_on_hand_max = 21
         self.cards_stack_max = 14
-        # 手牌状态-28 | 牌面状态-28
+        # Hand status-28 | Board status-28
         self.cards = torch.nn.Embedding(len(card_map) + 1, self.embedding_dim, padding_idx=0)
-        # 牌桌左\右端点数[0, 6]对应点数,7对应无牌
+        # The points on the left/right end of the table [0, 6] correspond to the points, 7 corresponds to no card
         self.numbers = torch.nn.Embedding(len(self.numbers) + 1, self.embedding_dim)
-        # 对手手牌数量|[0, 21]
+        # Number of opponent's hand cards|[0, 21]
         self.card_num_on_vs = torch.nn.Embedding(self.cards_on_hand_max + 1, self.embedding_dim)
-        # 牌库数量|[0,14]
+        # Number of cards in stock|[0,14]
         self.card_num_in_stock = torch.nn.Embedding(self.cards_stack_max + 1, self.embedding_dim)
 
-        # 至多21张手牌，牌桌至多28张
+        # Up to 21 cards in hand, up to 28 cards on the table
         self.backbone_in_dim = (21 + 28 + 1 + 1 + 1 + 1) * self.embedding_dim
         self.backbone = torch.nn.Sequential(
             torch.nn.BatchNorm1d(self.backbone_in_dim),
@@ -75,7 +75,7 @@ class ActionAndStateValueModel(torch.nn.Module):
         self.device = kwargs['device'] if 'device' in kwargs else 'cpu'
 
     def forward(self, data):
-        """出牌"""
+        """Play card"""
         cards_on_hand_features = self.cards(data[:, :21])
         cards_on_board_features = self.cards(data[:, 21:49])
         left_number_on_board_features = self.numbers(data[:, 49])

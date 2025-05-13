@@ -17,14 +17,14 @@ from utils import parse_config
 from models.ActionAndStateValueModel import parseStateAsModelInput, ActionAndStateValueModel
 
 """
-dominos card playing network, supervised learning for basic chess playing ability training.
+Dominos card playing network, supervised learning for basic chess playing ability training.
 Model output: a_t,v_t = f(s_t)
 a_t is used for playing cards, v_t is used for MCTS
 """
 
 
 class ValueActionLoss(torch.nn.Module):
-    """loss for Value network && Action policy network"""
+    """Loss for Value network && Action policy network"""
 
     def __init__(self, **kwargs):
         super().__init__()
@@ -38,7 +38,7 @@ class ValueActionLoss(torch.nn.Module):
 
 class DataLoaderX(DataLoader):
     """
-    speed up
+    Speed up
     """
 
     def __iter__(self):

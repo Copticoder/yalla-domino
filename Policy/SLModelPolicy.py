@@ -40,10 +40,10 @@ class SLModelPolicy(BasePolicy):
                 round_action['rank'] = rank
                 return round_action
 
-    # 使用出牌网络
+    # Use card playing network
     def play(self, **kwargs):
         """
-        使用策略网络出牌
+        Use policy network to play cards
         :param model:
         :return:
         """
@@ -52,5 +52,5 @@ class SLModelPolicy(BasePolicy):
         return self.validate_actions[0]
 
     def type(self):
-        """策略类型"""
+        """Policy type"""
         return "Model"

@@ -18,7 +18,7 @@ from utils import parse_config
 from models.SLModel import parseStateAsModelInput, SLModel
 
 """
-dominos card playing network, learning rules.
+Dominos card playing network, learning rules.
 Evaluation method, see if the top1 card played in the game is legal.
 """
 
@@ -36,7 +36,7 @@ class RewardMSELoss(torch.nn.Module):
 
 
 class ValueActionLoss(torch.nn.Module):
-    """loss for Value network && Action policy network"""
+    """Loss for Value network && Action policy network"""
 
     def __init__(self, **kwargs):
         super().__init__()
@@ -50,7 +50,7 @@ class ValueActionLoss(torch.nn.Module):
 
 class DataLoaderX(DataLoader):
     """
-    speed up
+    Speed up
     """
 
     def __iter__(self):
