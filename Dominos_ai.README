@@ -4,14 +4,22 @@ Since this work has been carried out intermittently, I have not written the code
 # each json files in ./configs is a strategy. human means that you can play a game vs other strategies with command lines.
 # eg. The state is as follow:
 # --------------------------------------------------
-# Player1 手牌: [[1, 1], [0, 0], [0, 1], [2, 3], [2, 6]]
-# Player2 手牌: 2
+# Player1 hand cards: [[1, 1], [0, 0], [0, 1], [2, 3], [2, 6]]
+# Player2 hand cards: 2
 # Board: [[3, 5], [5, 5], [5, 4], [4, 0], [0, 5], [5, 2], [2, 2], [2, 4], [4, 3], [3, 3], [3, 6], [6, 5], [5, 1], [1, 4], [4, 6], [6, 6]]
 #Stock: 5
 # --------------------------------------------------
-# 选择你要出的牌、位置：左侧3，右侧4，输入：卡牌@位置，如[3, 3]@3
+# Choose the card you want to play and position: left side 3, right side 4, input: card@position, e.g. [3, 3]@3
 # [2, 6]@4
 # [2, 6] is one of your cards. @3 means that you want to the card next to the left side of the Board. @4 means the right side.
+# The state is as follows:
+# --------------------------------------------------
+# Player1 cards: [[1, 1], [0, 0], [0, 1], [2, 3], [2, 6]]
+# Player2 cards: 2
+# Board: [[3, 5], [5, 5], [5, 4], [4, 0], [0, 5], [5, 2], [2, 2], [2, 4], [4, 3], [3, 3], [3, 6], [6, 5], [5, 1], [1, 4], [4, 6], [6, 6]]
+# Stock: 5
+# --------------------------------------------------
+# Choose the card you want to play and position: left side is 3, right side is 4, input format: card@position, e.g. [3, 3]@3
 
 # game/game_local.py monitors a game between strategies. you can use the following command to play with a SLModel policy.
 # also you can change different strategies by change the config file.
