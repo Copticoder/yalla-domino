@@ -33,12 +33,12 @@ class ActorCriticNetwork(nn.Module):
       self.actor_head = nn.Linear(prev_dim, num_actions)
       # Define the critic head
       self.critic_head = nn.Linear(prev_dim, 1)
-  def forward(self, env_step):
+  def forward(self, env_step, timestep):
       # Convert numpy inputs from EnvStep to torch tensors
       # Assuming network weights are float32, so convert obs to float32.
-      obs_tensor = torch.tensor(env_step.obs, dtype=torch.float32)
+      obs_tensor = env_step["obs"][:,timestep,:]
       # legal_actions are used as masks, boolean is appropriate.
-      legal_actions_tensor = torch.tensor(env_step.legal, dtype=torch.bool)
+      legal_actions_tensor = env_step["legal"][:,timestep,:]
 
       # Pass through the shared MLP
       x = self.shared_mlp(obs_tensor)
@@ -425,27 +425,24 @@ class RNaDSolver(policy_lib.Policy):
     # torch.backends.cudnn.benchmark = False
     
     random_seed_np = np.random.seed(self.config.seed) # Global NumPy seed
-    # replay buffer
-    self.rb = TensorDictReplayBuffer(
-        storage=LazyTensorStorage(self.config.batch_size * self.config.trajectory_max),
-        sampler=SliceSampler(traj_key="episode", num_slices=self.config.batch_size),
-        batch_size=self.config.batch_size,
-    )
     # Create a game and an example of a state.
     self._game = pyspiel.load_game(self.config.game_name)
 
     self._ex_state = self._play_chance(self._game.new_initial_state())
-    env_step = self._state_as_env_step(self._ex_state)
+    obs,_,_,_,_ = self._state_as_env_step(self._ex_state)
 
-    if hasattr(env_step.obs, 'size') and isinstance(env_step.obs.size, int):
-        input_dimension = env_step.obs.size # For NumPy array
-    elif hasattr(env_step.obs, 'numel'):
-        input_dimension = env_step.obs.numel() # For PyTorch tensor
-    else:
-        # Fallback or error if obs structure is unknown
-        raise TypeError(f"env_step.obs is of unexpected type: {type(env_step.obs)} and size cannot be determined for ActorCriticNetwork input_dim")
+   # replay buffer
+    self.rb = {
+      "obs": torch.zeros(self.config.batch_size, self.config.trajectory_max, obs.size().numel()),
+      "valid": torch.zeros(self.config.batch_size, self.config.trajectory_max, 1),
+      "player_id": torch.zeros(self.config.batch_size, self.config.trajectory_max, 1),
+      "rewards": torch.zeros(self.config.batch_size, self.config.trajectory_max, self._game.num_players()),
+      "legal": torch.zeros(self.config.batch_size, self.config.trajectory_max, self._game.num_distinct_actions(), dtype=bool),
+      "action_oh": torch.zeros(self.config.batch_size, self.config.trajectory_max, self._game.num_distinct_actions(), dtype=bool),
+      "policy": torch.zeros(self.config.batch_size, self.config.trajectory_max, self._game.num_distinct_actions(), dtype=float),
+    }
 
-    self.params = ActorCriticNetwork(input_dimension, self.config.policy_network_layers, self._game.num_distinct_actions())
+    self.params = ActorCriticNetwork(obs.size().numel(), self.config.policy_network_layers, self._game.num_distinct_actions())
 
     # The machinery related to updating parameters/learner.
     self._entropy_schedule = EntropySchedule(
@@ -468,23 +465,20 @@ class RNaDSolver(policy_lib.Policy):
   #   pi = self.config.finetune.post_process_policy(pi, env_step.legal)
   #   return pi
   
-  def actor_step(self, env_step: EnvStep):
-    # no gradient
+  def actor_step(self, timestep: int):
     with torch.no_grad():
-      pi, _, _, _ = self.params(env_step)
-      pi = np.asarray(pi).astype("float64")
-      # TODO(author18): is this policy normalization really needed?
-      pi = pi / np.sum(pi, axis=-1, keepdims=True)
+      pi, _, _, _ = self.params(self.rb, timestep)
+      pi = pi / torch.sum(pi, dim=-1, keepdim=True)
 
     action = np.apply_along_axis(
         lambda x: np.random.choice(range(pi.shape[1]), p=x), axis=-1, arr=pi)
     # TODO(author16): reapply the legal actions mask to bullet-proof sampling.
-    action_oh = np.zeros(pi.shape, dtype="float64")
+    action_oh = torch.zeros(pi.shape)
     action_oh[range(pi.shape[0]), action] = 1.0
 
-    actor_step = ActorStep(policy=pi, action_oh=action_oh, rewards=())  # pytype: disable=wrong-arg-types  # numpy-scalars
-
-    return action, actor_step
+    self.rb["action_oh"][:, timestep, :] = action_oh
+    self.rb["policy"][:, timestep, :] = pi
+    return action
   def step(self):
     """One step of the algorithm, that plays the game and improves params."""
     timestep = self.collect_batch_trajectory()
@@ -593,19 +587,15 @@ class RNaDSolver(policy_lib.Policy):
             # optimizer_target), logs
   
   def _batch_of_states_as_env_step(self,
-                                   states: Sequence[pyspiel.State]) -> EnvStep:
-    envs = {}
-    for state in states:
-      env = self._state_as_env_step(state)
-      for field in dataclasses.fields(EnvStep):
-        if field.name not in envs:
-          envs[field.name] = []
-        envs[field.name].append(getattr(env, field.name))
-    # stack the arrays
-    for field in dataclasses.fields(EnvStep):
-      envs[field.name] = np.stack(envs[field.name], axis=0)
-    # convert to EnvStep
-    return EnvStep(**envs)
+                                   states: Sequence[pyspiel.State], timestep: int) -> EnvStep:
+    with torch.no_grad():
+      for i, state in enumerate(states):
+        obs, legal, player_id, valid, rewards = self._state_as_env_step(state)
+        self.rb["obs"][i, timestep, :] = obs
+        self.rb["legal"][i, timestep, :] = legal
+        self.rb["player_id"][i, timestep, :] = player_id
+        self.rb["rewards"][i, timestep, :] = rewards
+        self.rb["valid"][i, timestep, :] = valid
 
   def _batch_of_states_apply_action(
       self, states: Sequence[pyspiel.State],
@@ -623,28 +613,15 @@ class RNaDSolver(policy_lib.Policy):
         self._play_chance(self._game.new_initial_state())
         for _ in range(self.config.batch_size)
     ]
-    timesteps = {}
-
-    env_step = self._batch_of_states_as_env_step(states)
+    timestep = 0
+    self._batch_of_states_as_env_step(states, timestep)
     for _ in range(self.config.trajectory_max):
-      prev_env_step = env_step
-      a, actor_step = self.actor_step(env_step)
+      a = self.actor_step(timestep)
 
       states = self._batch_of_states_apply_action(states, a)
-      env_step = self._batch_of_states_as_env_step(states)
-      timesteps.append(
-          TimeStep(
-              env=prev_env_step,
-              actor=ActorStep(
-                  action_oh=actor_step.action_oh,
-                  policy=actor_step.policy,
-                  rewards=env_step.rewards),
-          ))
-    for field in dataclasses.fields(TimeStep):
-      timesteps[field.name] = np.stack(timesteps[field.name], axis=0)
-    
-    return TimeStep(**timesteps)
-  
+      timestep += 1
+      self._batch_of_states_as_env_step(states, timestep)
+      
   def _state_as_env_step(self, state: pyspiel.State) -> EnvStep:
     # A terminal state must be communicated to players, however since
     # it's a terminal state things like the state_representation or
@@ -653,7 +630,7 @@ class RNaDSolver(policy_lib.Policy):
     # Therefore the code below:
     # - extracts the rewards
     # - if the state is terminal, uses a dummy other state for other fields.
-    rewards = np.array(state.returns(), dtype=np.float64)
+    rewards = state.returns()
 
     valid = not state.is_terminal()
     if not valid:
@@ -668,12 +645,7 @@ class RNaDSolver(policy_lib.Policy):
           f"Invalid StateRepresentation: {self.config.state_representation}.")
 
     # TODO(author16): clarify the story around rewards and valid.
-    return EnvStep(
-        obs=np.array(obs, dtype=np.float64),
-        legal=np.array(state.legal_actions_mask(), dtype=np.int8),
-        player_id=np.array(state.current_player(), dtype=np.float64),
-        valid=np.array(valid, dtype=np.float64),
-        rewards=rewards)
+    return torch.tensor(obs), torch.tensor(state.legal_actions_mask()), torch.tensor(state.current_player()), torch.tensor(valid), torch.tensor(rewards)
     
   def _play_chance(self, state: pyspiel.State) -> pyspiel.State:
     """Plays the chance nodes until we end up at another type of node.

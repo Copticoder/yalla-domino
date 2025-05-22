@@ -1,4 +1,0 @@
-{
-  "policy": "SLModel",
-  "weights": "./weights/RewardMSE.pth"
-}
