@@ -64,7 +64,7 @@ class PlayGame:
         """Play a game"""
         self.get_init_info()
         # Generate round 1 game with 1/4 probability
-        is_start_round = random.random() > 0.75
+        is_start_round = random.random() > 0.95
         p_pieces, o_pieces, s_pieces, b_pieces, t_sign = GameStart().game_init(is_start_round=is_start_round)
         round_monitor = DominoMonitor(
             player_pieces=p_pieces,

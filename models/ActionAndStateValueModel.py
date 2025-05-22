@@ -17,7 +17,7 @@ def parseStateAsModelInput(state):
     hand = [convert_card_to_index(c) for c in state['hand']]
     hand.sort()
     hand += [0] * (21 - len(hand))
-    # 牌桌序列填充至28位长度
+    # Pad board sequence to length 28
     board = [convert_card_to_index(c) for c in state['board']]
     board.sort()
     board += [0] * (28 - len(board))
