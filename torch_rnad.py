@@ -12,7 +12,7 @@ from torchrl.data import SliceSampler
 from torchrl.data.replay_buffers import TensorDictReplayBuffer, LazyTensorStorage
 from tensordict import TensorDict
 import torch
-import gc
+import dataclasses
 import pyspiel
 
 # Define ActorCriticNetwork at the module level
@@ -179,10 +179,10 @@ class FineTuning:
                learner_steps: int) -> torch.Tensor:
     """A configurable fine tuning of a policy."""
     assert policy.shape == mask.shape
-    do_finetune = np.logical_and(self.from_learner_steps >= 0,
-                                  learner_steps > self.from_learner_steps)
+    do_finetune = torch.logical_and(torch.tensor(self.from_learner_steps >= 0),
+                                   torch.tensor(learner_steps > self.from_learner_steps))
 
-    return np.where(do_finetune, self.post_process_policy(policy, mask),
+    return torch.where(do_finetune, self.post_process_policy(policy, mask),
                      policy)
 
   def post_process_policy(
@@ -193,7 +193,10 @@ class FineTuning:
     """Unconditionally post process a given masked policy."""
     assert policy.shape == mask.shape
     policy = self._threshold(policy, mask)
-    policy = self._discretize(policy)
+    # flatten policy to (B*T,A)
+    mu = self._discretize(policy.view(-1,policy.shape[-1]))
+    # reshape it back to the original shape (B,T,A)
+    policy = policy.view(policy.shape[0],policy.shape[1],1,-1)
     return policy
 
   def _threshold(self, policy: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -210,64 +213,64 @@ class FineTuning:
         (torch.max(policy, axis=-1, keepdims=True).values < self.policy_threshold))
     return mask * policy / torch.sum(mask * policy, axis=-1, keepdims=True)
 
-  def _discretize(self, policy: torch.Tensor) -> torch.Tensor:
-    """Round all action probabilities to a multiple of 1/self.discretize."""
-    if self.policy_discretization <= 0:
-      return policy
+  def _discretize(self, mu: torch.Tensor) -> torch.Tensor:
+      """
+      Discretize a batch of probability vectors into fixed-resolution distributions.
 
-    # The unbatched/single policy case:
-    if len(policy.shape) == 1:
-      return self._discretize_single(policy)
+      Given a batch of "soft" probability vectors `mu` (shape `[B*T, n_actions]`),
+      this function allocates exactly `policy_discretization` quanta (by default 32)
+      across each vector's entries in descending order of their original values.
+      Each entry's allocated quanta is the ceiling of its original weight-times-budget,
+      but capped by the remaining budget as we sweep through actions from largest
+      to smallest. Any leftover quanta are dumped into the top action. Finally, the
+      integer counts are renormalized back into probabilities.
 
-    # policy may be [B, A] or [T, B, A], etc. Thus add hk.BatchApply.
-    dims = len(policy.shape) - 1
-    policy_reshaped = policy.view(-1,policy.shape[-1])
-    discretize_vectorized = torch.vmap(self._discretize_single)
-    policy_reshaped = discretize_vectorized(policy_reshaped)
-    policy = policy_reshaped.view(policy.shape[:-1],-1)
-    return policy
+      Parameters
+      ----------
+      mu : torch.Tensor
+          A batch of unbatched probability vectors, shape `(B*T, n_actions)`,
+          where each row sums to 1 (or approximately so).
 
-  def _discretize_single(self, mu: torch.Tensor) -> torch.Tensor:
-    """A version of self._discretize but for the unbatched data."""
-    # TODO(author18): try to merge _discretize and _discretize_single
-    # into one function that handles both batched and unbatched cases.
-    if len(mu.shape) == 2:
-      mu_ = torch.squeeze(mu, axis=0)
-    else:
-      mu_ = mu
-    n_actions = mu_.shape[-1]
-    roundup = torch.ceil(mu_ * self.policy_discretization).to(torch.int32)
-    result = torch.zeros_like(mu_)
-    order = torch.argsort(-mu_)  # Indices of descending order.
-    weight_left = self.policy_discretization
+      Returns
+      -------
+      torch.Tensor
+          A tensor of shape `(B*T, n_actions)` where each row is a probability
+          vector that (a) sums exactly to 1, and (b) has values that are multiples
+          of `1 / policy_discretization`.
 
-    def f_disc(i, order, roundup, weight_left, result):
-      x = torch.minimum(roundup[order[i]], weight_left)
-      result = torch.where(weight_left >= 0, result.at[order[i]].add(x),
-                               result)
-      weight_left -= x
-      return i + 1, order, roundup, weight_left, result
-
-    def f_scan_scan(carry, x):
-      i, order, roundup, weight_left, result = carry
-      i_next, order_next, roundup_next, weight_left_next, result_next = f_disc(
-          i, order, roundup, weight_left, result)
-      carry_next = (i_next, order_next, roundup_next, weight_left_next,
-                    result_next)
-      return carry_next, x
-
-    (_, _, _, weight_left_next, result_next), _ = torch.lax.scan(
-        f_scan_scan,
-        init=(torch.as_tensor(0), order, roundup, weight_left, result),
-        xs=None,
-        length=n_actions)
-
-    result_next = torch.where(weight_left_next > 0,
-                            result_next.at[order[0]].add(weight_left_next),
-                            result_next)
-    if len(mu.shape) == 2:
-      result_next = torch.expand_dims(result_next, axis=0)
-    return result_next / self.policy_discretization
+      Example
+      -------
+      >>> mu = torch.tensor([[0.1, 0.2, 0.7],
+      ...                    [0.33, 0.33, 0.34]])
+      >>> discretize(mu)
+      tensor([[0.0000, 0.1875, 0.8125],
+              [0.3125, 0.3125, 0.3750]])
+      """
+      if self.policy_discretization <= 0:
+          return mu
+      policy_discretization = self.policy_discretization
+      n_actions = mu.shape[-1]
+      roundup = torch.ceil(mu * policy_discretization)
+      result = torch.zeros_like(mu)
+      order = torch.argsort(-mu)  # Indices of descending order.
+      weight_left = policy_discretization * torch.ones(mu.shape[0])
+      for i in range(n_actions):
+          next_action = order[:,i]
+          x = torch.minimum(roundup[torch.arange(next_action.size(0)),next_action], weight_left)
+          addition_mask = torch.zeros_like(mu)
+          addition_mask[torch.arange(mu.shape[0]),next_action] = 1
+          weight_left_mask = weight_left >= 0
+          result = result + (x.unsqueeze(1) * addition_mask * weight_left_mask.unsqueeze(1))
+          weight_left -= x
+          
+      weight_left_next = weight_left
+      result_next = result
+      addition_mask_next = torch.zeros_like(mu)
+      addition_mask_next[torch.arange(mu.shape[0]),order[:,0]] = 1
+      weight_left_next_mask = weight_left_next > 0
+      result_next = result_next + (weight_left_next.unsqueeze(1) * weight_left_next_mask.unsqueeze(1) * addition_mask_next)
+      discretized_mu = result_next / policy_discretization
+      return discretized_mu
 
 @dataclasses.dataclass
 class AdamConfig:
@@ -307,7 +310,7 @@ class RNaDConfig:
   # The learning rate for `params`.
   learning_rate: float = 0.00005
   # The config related to the ADAM optimizer used for updating `params`.
-  adam: AdamConfig = AdamConfig()
+  adam: AdamConfig = dataclasses.field(default_factory=AdamConfig)
   # All gradients values are clipped to [-clip_gradient, clip_gradient].
   clip_gradient: float = 10_000
   # The "speed" at which `params_target` is following `params`.
@@ -319,14 +322,42 @@ class RNaDConfig:
   entropy_schedule_size: Sequence[int] = (20_000,)
   # The weight of the reward regularisation term in RNaD.
   eta_reward_transform: float = 0.2
-  nerd: NerdConfig = NerdConfig()
+  nerd: NerdConfig = dataclasses.field(default_factory=NerdConfig)
   c_vtrace: float = 1.0
 
   # Options related to fine tuning of the agent.
-  finetune: FineTuning = FineTuning()
+  finetune: FineTuning = dataclasses.field(default_factory=FineTuning)
 
   # The seed that fully controls the randomness.
   seed: int = 42
+  
+def _policy_ratio(pi: torch.Tensor, mu: torch.Tensor, actions_oh: torch.Tensor,
+                  valid: torch.Tensor) -> torch.Tensor:
+  """Returns a ratio of policy pi/mu when selecting action a.
+
+  By convention, this ratio is 1 on non valid states
+  Args:
+    pi: the policy of shape [..., A].
+    mu: the sampling policy of shape [..., A].
+    actions_oh: a one-hot encoding of the current actions of shape [..., A].
+    valid: boolean tensor indicating valid states of shape [...,1].
+
+  Returns:
+    pi/mu on valid states and 1 otherwise. The shape is the same
+    as pi, mu or actions_oh but without the last dimension A.
+  """
+  
+  assert pi.shape == mu.shape == actions_oh.shape, "pi, mu, and actions_oh must have the same shape"
+  assert valid.shape == actions_oh.shape[:-1], "valid must have the same shape as actions_oh except the last dimension"
+  assert valid.dtype == torch.bool, "valid must be a boolean tensor"
+
+  def _select_action_prob(pi):
+    return (torch.sum(actions_oh * pi, axis=-1, keepdims=False) * valid +
+            ~valid)
+
+  pi_actions_prob = _select_action_prob(pi)
+  mu_actions_prob = _select_action_prob(mu)
+  return pi_actions_prob / mu_actions_prob 
 
 def _legal_policy(logits: torch.Tensor, legal_actions: torch.Tensor) -> torch.Tensor:
   """A soft-max policy that respects legal_actions."""
@@ -340,6 +371,7 @@ def _legal_policy(logits: torch.Tensor, legal_actions: torch.Tensor) -> torch.Te
                          0)  # Illegal actions become 0.
   exp_logits_sum = torch.sum(exp_logits, axis=-1, keepdims=True)
   return exp_logits / exp_logits_sum
+
 def legal_log_policy(logits: torch.Tensor,
                      legal_actions: torch.Tensor) -> torch.Tensor:
   """Return the log of the policy on legal action, 0 on illegal action."""
@@ -360,6 +392,155 @@ def legal_log_policy(logits: torch.Tensor,
   log_policy = torch.multiply(legal_actions,
                             (logits - max_legal_logit - baseline))
   return log_policy
+
+
+def player_k_has_played(valid: torch.Tensor, player_id: torch.Tensor,
+                player: int) -> torch.Tensor:
+    """Compute a mask where player k has played in the sequence. Useful for accurately calculating the value function when it's player k's turn."""
+    # assert that valid and player_id are the same shape
+    assert valid.shape == player_id.shape, "valid and player_id must have the same shape"
+    # assert that valid is a boolean tensor
+    if valid.dtype != torch.bool:
+        valid = valid.bool()
+    # create a new tensor player_k_has_played with the same shape as valid 
+    player_k_has_played = torch.zeros_like(valid)
+    # set player_k_has_played[t] to 1 if valid[t] and player_id[t] == player
+    player_k_has_played[valid & (player_id == player)] = 1
+    return player_k_has_played
+
+
+def v_trace(
+    v: torch.Tensor,
+    valid: torch.Tensor,
+    player_id: torch.Tensor,
+    acting_policy: torch.Tensor,
+    merged_policy: torch.Tensor,
+    merged_log_policy: torch.Tensor,    
+    player_others: torch.Tensor,
+    actions_oh: torch.Tensor,
+    reward: torch.Tensor,
+    player: int,
+    # Scalars below.
+    eta: float,
+    lambda_: float,
+    c: float,
+    rho: float,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+  """Custom VTrace for trajectories with a mix of different player steps."""
+  gamma = 1.0
+  
+  has_played = player_k_has_played(valid, player_id, player)
+  
+  policy_ratio = _policy_ratio(merged_policy, acting_policy, actions_oh, valid)
+  inv_mu = _policy_ratio(
+      torch.ones_like(merged_policy), acting_policy, actions_oh, valid)
+
+
+  # entropy bonus
+  eta_reg_entropy = (-eta *
+                     torch.sum(merged_policy * merged_log_policy, axis=-1) *
+                     torch.squeeze(player_others, axis=-1))
+  eta_log_policy = -eta * merged_log_policy * player_others
+
+  @dataclasses.dataclass(frozen=True)
+  class LoopVTraceCarry:
+    """The carry of the v-trace scan loop."""
+    reward: torch.Tensor
+    # The cumulated reward until the end of the episode. Uncorrected (v-trace).
+    # Gamma discounted and includes eta_reg_entropy.
+    reward_uncorrected: torch.Tensor
+    next_value: torch.Tensor
+    next_v_target: torch.Tensor
+    importance_sampling: torch.Tensor
+
+  init_state_v_trace = LoopVTraceCarry(
+      reward=torch.zeros_like(reward[-1]),
+      reward_uncorrected=torch.zeros_like(reward[-1]),
+      next_value=torch.zeros_like(v[-1]),
+      next_v_target=torch.zeros_like(v[-1]),
+      importance_sampling=torch.ones_like(policy_ratio[-1]))
+
+  def _loop_v_trace(carry: LoopVTraceCarry, x) -> Tuple[LoopVTraceCarry, Any]:
+    (cs, player_id, v, reward, eta_reg_entropy, valid, inv_mu, actions_oh,
+     eta_log_policy) = x
+
+    reward_uncorrected = (
+        reward + gamma * carry.reward_uncorrected + eta_reg_entropy)
+    discounted_reward = reward + gamma * carry.reward
+
+    # V-target:
+    our_v_target = (
+        v + jnp.expand_dims(
+            jnp.minimum(rho, cs * carry.importance_sampling), axis=-1) *
+        (jnp.expand_dims(reward_uncorrected, axis=-1) +
+         gamma * carry.next_value - v) + lambda_ * jnp.expand_dims(
+             jnp.minimum(c, cs * carry.importance_sampling), axis=-1) * gamma *
+        (carry.next_v_target - carry.next_value))
+
+    opp_v_target = jnp.zeros_like(our_v_target)
+    reset_v_target = jnp.zeros_like(our_v_target)
+
+    # Learning output:
+    our_learning_output = (
+        v +  # value
+        eta_log_policy +  # regularisation
+        actions_oh * jnp.expand_dims(inv_mu, axis=-1) *
+        (jnp.expand_dims(discounted_reward, axis=-1) + gamma * jnp.expand_dims(
+            carry.importance_sampling, axis=-1) * carry.next_v_target - v))
+
+    opp_learning_output = jnp.zeros_like(our_learning_output)
+    reset_learning_output = jnp.zeros_like(our_learning_output)
+
+    # State carry:
+    our_carry = LoopVTraceCarry(
+        reward=jnp.zeros_like(carry.reward),
+        next_value=v,
+        next_v_target=our_v_target,
+        reward_uncorrected=jnp.zeros_like(carry.reward_uncorrected),
+        importance_sampling=jnp.ones_like(carry.importance_sampling))
+    opp_carry = LoopVTraceCarry(
+        reward=eta_reg_entropy + cs * discounted_reward,
+        reward_uncorrected=reward_uncorrected,
+        next_value=gamma * carry.next_value,
+        next_v_target=gamma * carry.next_v_target,
+        importance_sampling=cs * carry.importance_sampling)
+    reset_carry = init_state_v_trace
+
+    # Invalid turn: init_state_v_trace and (zero target, learning_output)
+    # pyformat: disable
+    return _where(valid,  # pytype: disable=bad-return-type  # numpy-scalars
+                  _where((player_id == player),
+                         (our_carry, (our_v_target, our_learning_output)),
+                         (opp_carry, (opp_v_target, opp_learning_output))),
+                  (reset_carry, (reset_v_target, reset_learning_output)))
+    # pyformat: enable
+
+  _, (v_target, learning_output) = lax.scan(
+      f=_loop_v_trace,
+      init=init_state_v_trace,
+      xs=(policy_ratio, player_id, v, reward, eta_reg_entropy, valid, inv_mu,
+          actions_oh, eta_log_policy),
+      reverse=True)
+
+  return v_target, has_played, learning_output
+def player_others(player_ids: torch.Tensor, valid: torch.Tensor,
+                   player: int) -> torch.Tensor:
+  """A vector of 1 for the current player and -1 for others.
+
+  Args:
+    player_ids: Tensor [...] containing player ids (0 <= player_id < N).
+    valid: Tensor [...] containing whether these states are valid.
+    player: The player id as int.
+
+  Returns:
+    player_other: is 1 for the current player and -1 for others [..., 1].
+  """
+  assert player_ids.shape == valid.shape, "player_ids and valid must have the same shape"
+  current_player_tensor = (player_ids == player) 
+
+  res = 2 * current_player_tensor - 1
+  res = res * valid
+  return res.unsqueeze(-1)
 class RNaDSolver(policy_lib.Policy):
   def __init__(self, config: RNaDConfig):
     self.config = config
@@ -440,7 +621,7 @@ class RNaDSolver(policy_lib.Policy):
         "learner_steps": self.learner_steps,
     })
     return logs
-  
+
   def loss(self, ts: TensorDict, alpha: float,
            learner_steps: int) -> float:
     # pass every timestep to the network using torch vmap
@@ -459,16 +640,16 @@ class RNaDSolver(policy_lib.Policy):
 
     v_target_list, has_played_list, v_trace_policy_target_list = [], [], []
     for player in range(self._game.num_players()):
-      reward = ts.actor.rewards[:, :, player]  # [T, B, Player]
+      reward = ts["env_step_td"]["rewards"].squeeze()[:,:,player]  # [T, B, Player]
       v_target_, has_played, policy_target_ = v_trace(
           v_target,
-          ts.env.valid,
-          ts.env.player_id,
-          ts.actor.policy,
-          policy_pprocessed,
-          log_policy_reg,
-          _player_others(ts.env.player_id, ts.env.valid, player),
-          ts.actor.action_oh,
+          ts["env_step_td"]["valid"].squeeze(),
+          ts["env_step_td"]["player_id"].squeeze(),
+          ts["policy"].squeeze(),
+          policy_pprocessed.squeeze(),
+          log_policy_reg.squeeze(),
+          player_others(ts["env_step_td"]["player_id"].squeeze(), ts["env_step_td"]["valid"].squeeze(), player),
+          ts["action_oh"].squeeze(),
           reward,
           player,
           lambda_=1.0,
@@ -602,7 +783,7 @@ class RNaDSolver(policy_lib.Policy):
           f"Invalid StateRepresentation: {self.config.state_representation}.")
 
     # TODO(author16): clarify the story around rewards and valid.
-    return torch.tensor(obs, dtype=torch.float32), torch.tensor(state.legal_actions_mask(), dtype=bool), torch.tensor(state.current_player(), dtype=torch.int32), torch.tensor(valid, dtype=torch.int8), torch.tensor(rewards, dtype=torch.float64)
+    return torch.tensor(obs, dtype=torch.float32), torch.tensor(state.legal_actions_mask(), dtype=bool), torch.tensor(state.current_player(), dtype=torch.int8), torch.tensor(valid, dtype=bool), torch.tensor(rewards, dtype=torch.float16)
     
   def _play_chance(self, state: pyspiel.State) -> pyspiel.State:
     """Plays the chance nodes until we end up at another type of node.
