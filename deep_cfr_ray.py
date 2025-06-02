@@ -13,7 +13,7 @@ from open_spiel.python import policy
 from tqdm import tqdm
 @ray.remote
 class DeepCFRActor:
-    def __init__(self, game, advantage_networks_state_dicts, num_traversals_per_actor):
+    def __init__(self, game, advantage_networks_state_dicts, num_traversals_per_actor, advantage_network_hidden_layers):
         self.game = game
         self._num_actions = game.num_distinct_actions()
         
@@ -25,7 +25,7 @@ class DeepCFRActor:
         # Create local copies of advantage networks
         self.advantage_networks = []
         for i, state_dict in enumerate(advantage_networks_state_dicts):
-            net = MLP(self._embedding_size, [64], self.num_distinct_actions)  # Match your architecture
+            net = MLP(self._embedding_size, advantage_network_hidden_layers, self.num_distinct_actions)  # Use passed hidden layers
             net.load_state_dict(state_dict)
             net.eval()  # Set to evaluation mode
             self.advantage_networks.append(net)
@@ -172,6 +172,9 @@ class Orchestrator(policy.Policy):
         self._num_actions = self.game.num_distinct_actions()
         self._learning_rate = learning_rate
 
+        # Store advantage network layer configuration to pass to actors
+        self._advantage_network_layers_list = list(advantage_network_layers)
+
         # Define strategy network, loss & memory.
         self._strategy_memories = ReservoirBuffer(memory_capacity)
         self._policy_network = MLP(self._embedding_size,
@@ -187,7 +190,7 @@ class Orchestrator(policy.Policy):
               ReservoirBuffer(memory_capacity) for _ in range(self._num_players)
         ]
         self._advantage_networks = [
-            MLP(self._embedding_size, list(advantage_network_layers),
+            MLP(self._embedding_size, self._advantage_network_layers_list, # Use the stored list
                 self._num_actions) for _ in range(self._num_players)
         ]
         self._loss_advantages = nn.MSELoss(reduction="mean")
@@ -207,7 +210,10 @@ class Orchestrator(policy.Policy):
         """Initialize actors with current network parameters"""
         advantage_networks_state_dicts = [net.state_dict() for net in self._advantage_networks]
         self.actors = [DeepCFRActor.remote(
-            self.game, advantage_networks_state_dicts, self.num_traversals_per_actor) 
+            self.game, 
+            advantage_networks_state_dicts, 
+            self.num_traversals_per_actor,
+            self._advantage_network_layers_list) # Pass the stored list
                        for _ in range(self.num_actors)]
 
     def _update_actor_networks(self):
@@ -361,20 +367,20 @@ class Orchestrator(policy.Policy):
         return {action: probs[0][action] for action in legal_actions}
 
 if __name__ == "__main__":
-    game = pyspiel.load_game('kuhn_poker')
+    game = pyspiel.load_game('leduc_poker')
     solver = Orchestrator(
         game,
-        policy_network_layers=(64,),
-        advantage_network_layers=(64,),
+        policy_network_layers=(64,64,64),
+        advantage_network_layers=(64,64,64),
         num_iterations=101,
         reinitialize_advantage_networks=True,
-        num_traversals=375,
+        num_traversals=1500,
         learning_rate=1e-3,
-        batch_size_advantage=256,
-        batch_size_strategy=256,
-        memory_capacity=1000000,
-        policy_network_train_steps=2500,
-        advantage_network_train_steps=375,
+        batch_size_advantage=2048,
+        batch_size_strategy=2048,
+        memory_capacity=1e6,
+        policy_network_train_steps=5000,
+        advantage_network_train_steps=750,
         num_actors=4
     )
     import time
