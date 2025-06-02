@@ -170,7 +170,6 @@ class Orchestrator(policy.Policy):
         self._num_traversals = num_traversals
         self._reinitialize_advantage_networks = reinitialize_advantage_networks
         self._num_actions = self.game.num_distinct_actions()
-        self._iteration = 1
         self._learning_rate = learning_rate
 
         # Define strategy network, loss & memory.
@@ -247,7 +246,6 @@ class Orchestrator(policy.Policy):
                 
                 print(f"Advantage loss for player {p}: {advantage_losses[p][-1]}")
                 
-            self._iteration += 1
             
         policy_loss = self._learn_strategy_network()
         
@@ -368,13 +366,13 @@ if __name__ == "__main__":
         game,
         policy_network_layers=(64,),
         advantage_network_layers=(64,),
-        num_iterations=50,
+        num_iterations=101,
         reinitialize_advantage_networks=True,
-        num_traversals=1500,
+        num_traversals=375,
         learning_rate=1e-3,
         batch_size_advantage=256,
         batch_size_strategy=256,
-        memory_capacity=1e6,
+        memory_capacity=1000000,
         policy_network_train_steps=2500,
         advantage_network_train_steps=375,
         num_actors=4
