@@ -13,7 +13,7 @@ from open_spiel.python import policy
 from tqdm import tqdm
 @ray.remote
 class DeepCFRActor:
-    def __init__(self, game, advantage_networks_refs, num_traversals_per_actor, advantage_network_hidden_layers):
+    def __init__(self, game, advantage_networks_refs, num_traversals_per_actor):
         self.game = game
         self._num_actions = game.num_distinct_actions()
         
@@ -124,16 +124,9 @@ class Orchestrator(policy.Policy):
                  policy_network_train_steps: int = 1,
                  advantage_network_train_steps: int = 1,
                  reinitialize_advantage_networks: bool = True, 
+                 evaluation_interval: int = 10,
+                 num_actors: int = 0,
                 ):
-        try:
-            ray.shutdown()
-        except:
-            pass
-        
-        ray.init(
-            runtime_env={"env_vars": {"RAY_DEBUG": "1"}},
-            ignore_reinit_error=True,
-        )
         
         self.game = game
         all_players = list(range(self.game.num_players()))
@@ -155,7 +148,7 @@ class Orchestrator(policy.Policy):
         self._reinitialize_advantage_networks = reinitialize_advantage_networks
         self._num_actions = self.game.num_distinct_actions()
         self._learning_rate = learning_rate
-
+        self.evaluation_interval = evaluation_interval
         # Store advantage network layer configuration to pass to actors
         self._advantage_network_layers_list = list(advantage_network_layers)
 
@@ -168,7 +161,7 @@ class Orchestrator(policy.Policy):
         self._loss_policy = nn.MSELoss()
         self._optimizer_policy = torch.optim.Adam(
             self._policy_network.parameters(), lr=learning_rate)
-
+        self.num_actors = num_actors
         # Define advantage network, loss & memory. (One per player)
         self._advantage_memories = [
               ReservoirBuffer(memory_capacity) for _ in range(self._num_players)
@@ -179,6 +172,7 @@ class Orchestrator(policy.Policy):
         ]
         self._advantage_networks_refs = [ray.put(net) for net in self._advantage_networks]
         self._loss_advantages = nn.MSELoss(reduction="mean")
+        self.num_actors = num_actors
         self._optimizer_advantages = []
         for p in range(self._num_players):
             self._optimizer_advantages.append(
@@ -187,19 +181,12 @@ class Orchestrator(policy.Policy):
 
     def _initialize_actors(self):
         """Initialize actors with current network parameters"""
-        # Get number of available CPUs for Ray actors
-        num_cpus = ray.cluster_resources()['CPU']
-        # Leave 1 CPU for the main process
-        num_actors = max(1, int(num_cpus) - 1)
-        self.num_actors = num_actors
-
         # Calculate traversals per actor
         self.num_traversals_per_actor = max(1, self._num_traversals // self.num_actors)
         self.actors = [DeepCFRActor.remote(
             self.game, 
             self._advantage_networks_refs, 
-            self.num_traversals_per_actor,
-            self._advantage_network_layers_list) # Pass the stored list
+            self.num_traversals_per_actor) # Pass the stored list
                        for _ in range(self.num_actors)]
         
     def clear_advantage_buffers(self):
@@ -249,7 +236,9 @@ class Orchestrator(policy.Policy):
                 self._advantage_networks_refs[p] = ray.put(self._advantage_networks[p])
 
                 print(f"Advantage loss for player {p}: {advantage_losses[p][-1]}")
-            
+            if i % self.evaluation_interval == 0:
+                print(f"Evaluation at iteration {i}")
+                print(self.evaluate_agent())
         policy_loss = self._learn_strategy_network()
         
         
@@ -260,10 +249,33 @@ class Orchestrator(policy.Policy):
         self._advantage_networks[player].reset()
         self._optimizer_advantages[player] = torch.optim.Adam(
             self._advantage_networks[player].parameters(), lr=self._learning_rate)
-
+        
+    def evaluate_agent(self, num_episodes=100):
+        """evaluate the agent on the game against a random agent"""
+        self._learn_strategy_network()
+        player_0_returns = np.array([])
+        player_1_returns = np.array([])
+        for _ in tqdm(range(num_episodes), desc="Evaluating agent"):
+            state = self._game.new_initial_state()
+            while not state.is_terminal():
+                if state.is_chance_node():
+                    chance_outcome, chance_proba = zip(*state.chance_outcomes())
+                    action = np.random.choice(chance_outcome, p=chance_proba)
+                elif state.current_player() == 0:
+                    action = self.action_probabilities(state)
+                    # take the action with highest probability
+                    action = np.argmax(list(action.values()))
+                    action = state.legal_actions()[action]
+                else:
+                    # take random action
+                    action = np.random.choice(state.legal_actions())
+                state = state.child(action)
+            player_0_returns = np.append(player_0_returns, state.returns()[0])
+            player_1_returns = np.append(player_1_returns, state.returns()[1])
+        return np.sum(player_0_returns) / num_episodes, np.sum(player_1_returns) / num_episodes
     def _learn_strategy_network(self):
         """Compute the loss over the strategy network."""
-        for step in range(self._policy_network_train_steps):
+        for step in tqdm(range(self._policy_network_train_steps), desc="Training policy network"):
             if self._batch_size_strategy:
                 strategy_memory_size = len(self._strategy_memories)
                 if self._batch_size_strategy > strategy_memory_size:
@@ -294,7 +306,6 @@ class Orchestrator(policy.Policy):
             loss_strategy = self._loss_policy(iters * outputs, iters * ac_probs)
             loss_strategy.backward()
             self._optimizer_policy.step()
-
         return loss_strategy.detach().numpy()
 
     @property
@@ -364,20 +375,36 @@ class Orchestrator(policy.Policy):
         return {action: probs[0][action] for action in legal_actions}
 
 if __name__ == "__main__":
-    game = pyspiel.load_game('leduc_poker')
+    try:
+        ray.shutdown()
+    except:
+        pass
+    
+    ray.init(
+        runtime_env={"env_vars": {"RAY_DEBUG": "1"}},
+        ignore_reinit_error=True,
+    )
+    game = pyspiel.load_game('kuhn_poker')
+    # Get number of available CPUs for Ray actors
+    num_cpus = ray.cluster_resources()['CPU']
+    # Leave 1 CPU for the main process
+    num_actors = max(1, int(num_cpus) - 1)
+
     solver = Orchestrator(
         game,
-        policy_network_layers=(64,64,64),
-        advantage_network_layers=(64,64,64),
-        num_iterations=100,
-        reinitialize_advantage_networks=True,
-        num_traversals=20000,
-        learning_rate=1e-3,
-        batch_size_advantage=256,
-        batch_size_strategy=256,
-        memory_capacity=1e6,
-        policy_network_train_steps=5000,
-        advantage_network_train_steps=1000,
+policy_network_layers=(64,),
+advantage_network_layers=(64,),
+num_iterations=101,
+num_traversals=375,
+reinitialize_advantage_networks=True,
+learning_rate=1e-3,
+batch_size_advantage=256,
+batch_size_strategy=256,
+memory_capacity=1000000,
+policy_network_train_steps=2500,
+advantage_network_train_steps=375,
+evaluation_interval=10,
+num_actors=1
     )
     _, advantage_losses, policy_loss = solver.solve()
     
