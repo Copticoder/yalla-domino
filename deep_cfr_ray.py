@@ -384,7 +384,7 @@ if __name__ == "__main__":
         runtime_env={"env_vars": {"RAY_DEBUG": "1"}},
         ignore_reinit_error=True,
     )
-    game = pyspiel.load_game('kuhn_poker')
+    game = pyspiel.load_game('leduc_poker')
     # Get number of available CPUs for Ray actors
     num_cpus = ray.cluster_resources()['CPU']
     # Leave 1 CPU for the main process
@@ -394,7 +394,7 @@ if __name__ == "__main__":
         game,
 policy_network_layers=(64,),
 advantage_network_layers=(64,),
-num_iterations=101,
+num_iterations=200,
 num_traversals=375,
 reinitialize_advantage_networks=True,
 learning_rate=1e-3,
