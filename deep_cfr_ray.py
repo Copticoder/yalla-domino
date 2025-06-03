@@ -20,7 +20,7 @@ class DeepCFRActor:
         self.num_traversals_per_actor = num_traversals_per_actor
         self.num_distinct_actions = game.num_distinct_actions()
         self._embedding_size = len(game.new_initial_state().information_state_tensor(0))
-        self.advantage_data = [[],[]]
+        self.advantage_data = []
         self.strategy_data = []
         # Create local copies of advantage networks
         self.advantage_networks = []
@@ -38,16 +38,13 @@ class DeepCFRActor:
         
     def batch_traverse_tree_tasks(self, player, iteration):
         """Perform multiple traversals and collect data locally before adding to shared memory."""
-        advantage_data = [[],[]]
-        strategy_data = []
+        
         for _ in range(self.num_traversals_per_actor):
             state = self.game.new_initial_state()
             self._traverse_game_tree(state, player, iteration)
-            advantage_data[player].extend(self.advantage_data[player])
-            strategy_data.extend(self.strategy_data)
-        self.advantage_data = [[],[]]
-        self.strategy_data = []
-        return advantage_data, strategy_data
+        advantage_data_ref = ray.put(self.advantage_data)
+        strategy_data_ref = ray.put(self.strategy_data)
+        return advantage_data_ref, strategy_data_ref
 
     def _traverse_game_tree(self, state, player, iteration):
       """Performs a traversal of the game tree.
@@ -87,9 +84,9 @@ class DeepCFRActor:
         sampled_regret_arr = [0] * self._num_actions
         for action in sampled_regret:
           sampled_regret_arr[action] = sampled_regret[action]
-        self.advantage_data[player].append(
+        self.advantage_data.append(
             AdvantageMemory(state.information_state_tensor(), iteration,
-                            sampled_regret_arr, action))
+                            sampled_regret_arr))
         return cfv
       else:
         other_player = state.current_player()
@@ -126,7 +123,6 @@ class DeepCFRActor:
             
         return advantages, matched_regrets
 
-
 class Orchestrator(policy.Policy):
     def __init__(self, game, policy_network_layers=(256, 256),
                  advantage_network_layers=(128, 128),
@@ -139,7 +135,7 @@ class Orchestrator(policy.Policy):
                  policy_network_train_steps: int = 1,
                  advantage_network_train_steps: int = 1,
                  reinitialize_advantage_networks: bool = True, 
-                 num_actors: int = 4):
+                ):
         try:
             ray.shutdown()
         except:
@@ -151,7 +147,6 @@ class Orchestrator(policy.Policy):
         )
         
         self.game = game
-        self.num_actors = num_actors
         all_players = list(range(self.game.num_players()))
         super(Orchestrator, self).__init__(self.game, all_players)
         self._game = self.game
@@ -200,14 +195,17 @@ class Orchestrator(policy.Policy):
                 torch.optim.Adam(
                     self._advantage_networks[p].parameters(), lr=learning_rate))
 
+    def _initialize_actors(self):
+        """Initialize actors with current network parameters"""
+        # Get number of available CPUs for Ray actors
+        num_cpus = ray.cluster_resources()['CPU']
+        # Leave 1 CPU for the main process
+        num_actors = max(1, int(num_cpus) - 1)
+        self.num_actors = num_actors
+
         # Calculate traversals per actor
         self.num_traversals_per_actor = max(1, self._num_traversals // self.num_actors)
         
-        # Initialize actors with current network state
-        self._initialize_actors()
-
-    def _initialize_actors(self):
-        """Initialize actors with current network parameters"""
         advantage_networks_state_dicts = [net.state_dict() for net in self._advantage_networks]
         self.actors = [DeepCFRActor.remote(
             self.game, 
@@ -226,32 +224,63 @@ class Orchestrator(policy.Policy):
     def clear_advantage_buffers(self):
         for p in range(self._num_players):
             self._advantage_memories[p].clear()
+            
+    def kill_actors(self):
+        for actor in self.actors:
+            ray.kill(actor)
     
     def solve(self):
         """Solution logic for Deep CFR."""
         advantage_losses = collections.defaultdict(list)
         
-        for i in tqdm(range(self._num_iterations), desc="Training iterations"):
-            for p in tqdm(range(self._num_players), desc=f"Players (iteration {i+1})", leave=False):
+        for i in tqdm(range(self._num_iterations), desc="CFR Iterations"):
+            for p in tqdm(range(self._num_players), desc=f"Iteration {i} Players"):
+                # Initialize actors with current network state
+                a = time.time()
+                self._initialize_actors()
+                b = time.time()
+                print(f"Time taken for initialize actors: {b - a:.2f} seconds")
+                a = time.time()
                 # Update actor networks with current parameters before traversals
                 self._update_actor_networks()
                 # Parallel traversals
+                b = time.time()
+                print(f"Time taken for update actor networks: {b - a:.2f} seconds")
+                a = time.time()
                 traversal_tasks = [actor.batch_traverse_tree_tasks.remote(
                     p, i) 
                     for actor in self.actors]
-                results = ray.get(traversal_tasks)
-                for result in results:
-                    self._advantage_memories[p].add(result[0][p])
-                    self._strategy_memories.add(result[1])
+                # Wait for all traversals to complete and collect results
+                while traversal_tasks:
+                    # Wait for at least one task to complete
+                    done_ids, traversal_tasks = ray.wait(traversal_tasks)
+                    
+                    # Get the results from completed tasks
+                    for done_id in done_ids:
+                        advantage_data_ref, strategy_data_ref = ray.get(done_id)
+                        # Get actual data from references
+                        advantage_data = ray.get(advantage_data_ref)
+                        strategy_data = ray.get(strategy_data_ref)
+                        
+                        # Add data to memories
+                        for data in advantage_data:
+                            self._advantage_memories[p].add(data)
+                        for data in strategy_data:
+                            self._strategy_memories.add(data)
+                b = time.time()
+                print(f"Time taken for traversals: {b - a:.2f} seconds")
 
+                # Reinitialize advantage networks
                 if self._reinitialize_advantage_networks:
                     self.reinitialize_advantage_network(p)
-                
+                self.kill_actors()
+                a = time.time()
                 # Train advantage network
                 advantage_losses[p].append(self._learn_advantage_network(p))
-                
+                b = time.time()
+                print(f"Time taken for learn: {b - a:.2f} seconds")
+
                 print(f"Advantage loss for player {p}: {advantage_losses[p][-1]}")
-                
             
         policy_loss = self._learn_strategy_network()
         
@@ -310,7 +339,7 @@ class Orchestrator(policy.Policy):
 
     def _learn_advantage_network(self, player):
         """Optimized advantage network training with pre-allocated arrays."""
-        for step in range(self._advantage_network_train_steps):
+        for step in tqdm(range(self._advantage_network_train_steps), desc=f"Training advantage network for player {player}"):
             if self._batch_size_advantage:
                 memory_size = len(self._advantage_memories[player])
                 if self._batch_size_advantage > memory_size:
@@ -367,7 +396,7 @@ class Orchestrator(policy.Policy):
         return {action: probs[0][action] for action in legal_actions}
 
 if __name__ == "__main__":
-    game = pyspiel.load_game('leduc_poker')
+    game = pyspiel.load_game('kuhn_poker')
     solver = Orchestrator(
         game,
         policy_network_layers=(64,64,64),
@@ -376,15 +405,15 @@ if __name__ == "__main__":
         reinitialize_advantage_networks=True,
         num_traversals=1500,
         learning_rate=1e-3,
-        batch_size_advantage=2048,
-        batch_size_strategy=2048,
+        batch_size_advantage=256,
+        batch_size_strategy=256,
         memory_capacity=1e6,
         policy_network_train_steps=5000,
         advantage_network_train_steps=750,
-        num_actors=4
     )
     import time
     start_time = time.time()
+
     _, advantage_losses, policy_loss = solver.solve()
     end_time = time.time()
     print(f"Time taken: {end_time - start_time:.2f} seconds")
