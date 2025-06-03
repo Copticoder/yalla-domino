@@ -13,7 +13,7 @@ from open_spiel.python import policy
 from tqdm import tqdm
 @ray.remote
 class DeepCFRActor:
-    def __init__(self, game, advantage_networks_state_dicts, num_traversals_per_actor, advantage_network_hidden_layers):
+    def __init__(self, game, advantage_networks_refs, num_traversals_per_actor, advantage_network_hidden_layers):
         self.game = game
         self._num_actions = game.num_distinct_actions()
         
@@ -23,19 +23,8 @@ class DeepCFRActor:
         self.advantage_data = []
         self.strategy_data = []
         # Create local copies of advantage networks
-        self.advantage_networks = []
-        for i, state_dict in enumerate(advantage_networks_state_dicts):
-            net = MLP(self._embedding_size, advantage_network_hidden_layers, self.num_distinct_actions)  # Use passed hidden layers
-            net.load_state_dict(state_dict)
-            net.eval()  # Set to evaluation mode
-            self.advantage_networks.append(net)
-        
-    def update_advantage_networks(self, advantage_networks_state_dicts):
-        """Update local network copies with new parameters"""
-        for i, state_dict in enumerate(advantage_networks_state_dicts):
-            self.advantage_networks[i].load_state_dict(state_dict)
-            self.advantage_networks[i].eval()
-        
+        self.advantage_networks = ray.get(advantage_networks_refs)
+
     def batch_traverse_tree_tasks(self, player, iteration):
         """Perform multiple traversals and collect data locally before adding to shared memory."""
         
@@ -188,6 +177,7 @@ class Orchestrator(policy.Policy):
             MLP(self._embedding_size, self._advantage_network_layers_list, # Use the stored list
                 self._num_actions) for _ in range(self._num_players)
         ]
+        self._advantage_networks_refs = [ray.put(net) for net in self._advantage_networks]
         self._loss_advantages = nn.MSELoss(reduction="mean")
         self._optimizer_advantages = []
         for p in range(self._num_players):
@@ -205,22 +195,13 @@ class Orchestrator(policy.Policy):
 
         # Calculate traversals per actor
         self.num_traversals_per_actor = max(1, self._num_traversals // self.num_actors)
-        
-        advantage_networks_state_dicts = [net.state_dict() for net in self._advantage_networks]
         self.actors = [DeepCFRActor.remote(
             self.game, 
-            advantage_networks_state_dicts, 
+            self._advantage_networks_refs, 
             self.num_traversals_per_actor,
             self._advantage_network_layers_list) # Pass the stored list
                        for _ in range(self.num_actors)]
-
-    def _update_actor_networks(self):
-        """Update actor networks with current parameters"""
-        advantage_networks_state_dicts = [net.state_dict() for net in self._advantage_networks]
-        update_tasks = [actor.update_advantage_networks.remote(advantage_networks_state_dicts) 
-                       for actor in self.actors]
-        ray.get(update_tasks)
-
+        
     def clear_advantage_buffers(self):
         for p in range(self._num_players):
             self._advantage_memories[p].clear()
@@ -236,17 +217,8 @@ class Orchestrator(policy.Policy):
         for i in tqdm(range(self._num_iterations), desc="CFR Iterations"):
             for p in tqdm(range(self._num_players), desc=f"Iteration {i} Players"):
                 # Initialize actors with current network state
-                a = time.time()
                 self._initialize_actors()
-                b = time.time()
-                print(f"Time taken for initialize actors: {b - a:.2f} seconds")
-                a = time.time()
-                # Update actor networks with current parameters before traversals
-                self._update_actor_networks()
                 # Parallel traversals
-                b = time.time()
-                print(f"Time taken for update actor networks: {b - a:.2f} seconds")
-                a = time.time()
                 traversal_tasks = [actor.batch_traverse_tree_tasks.remote(
                     p, i) 
                     for actor in self.actors]
@@ -267,18 +239,14 @@ class Orchestrator(policy.Policy):
                             self._advantage_memories[p].add(data)
                         for data in strategy_data:
                             self._strategy_memories.add(data)
-                b = time.time()
-                print(f"Time taken for traversals: {b - a:.2f} seconds")
 
                 # Reinitialize advantage networks
                 if self._reinitialize_advantage_networks:
                     self.reinitialize_advantage_network(p)
                 self.kill_actors()
-                a = time.time()
                 # Train advantage network
                 advantage_losses[p].append(self._learn_advantage_network(p))
-                b = time.time()
-                print(f"Time taken for learn: {b - a:.2f} seconds")
+                self._advantage_networks_refs[p] = ray.put(self._advantage_networks[p])
 
                 print(f"Advantage loss for player {p}: {advantage_losses[p][-1]}")
             
@@ -396,27 +364,22 @@ class Orchestrator(policy.Policy):
         return {action: probs[0][action] for action in legal_actions}
 
 if __name__ == "__main__":
-    game = pyspiel.load_game('kuhn_poker')
+    game = pyspiel.load_game('leduc_poker')
     solver = Orchestrator(
         game,
         policy_network_layers=(64,64,64),
         advantage_network_layers=(64,64,64),
-        num_iterations=101,
+        num_iterations=100,
         reinitialize_advantage_networks=True,
-        num_traversals=1500,
+        num_traversals=20000,
         learning_rate=1e-3,
         batch_size_advantage=256,
         batch_size_strategy=256,
         memory_capacity=1e6,
         policy_network_train_steps=5000,
-        advantage_network_train_steps=750,
+        advantage_network_train_steps=1000,
     )
-    import time
-    start_time = time.time()
-
     _, advantage_losses, policy_loss = solver.solve()
-    end_time = time.time()
-    print(f"Time taken: {end_time - start_time:.2f} seconds")
     
     for player, losses in list(advantage_losses.items()):
         print("Advantage for player:", player,
