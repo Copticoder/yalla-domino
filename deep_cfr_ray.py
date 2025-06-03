@@ -11,6 +11,7 @@ import numpy as np
 from deep_cfr import MLP, ReservoirBuffer, StrategyMemory, AdvantageMemory
 from open_spiel.python import policy
 from tqdm import tqdm
+import wandb
 @ray.remote
 class DeepCFRActor:
     def __init__(self, game, advantage_networks_refs, num_traversals_per_actor):
@@ -151,8 +152,10 @@ class Orchestrator(policy.Policy):
         self.evaluation_interval = evaluation_interval
         # Store advantage network layer configuration to pass to actors
         self._advantage_network_layers_list = list(advantage_network_layers)
-
+        self.advantage_network_layers = advantage_network_layers
+        self.policy_network_layers = policy_network_layers
         # Define strategy network, loss & memory.
+        self.memory_capacity = memory_capacity
         self._strategy_memories = ReservoirBuffer(memory_capacity)
         self._policy_network = MLP(self._embedding_size,
                                   list(policy_network_layers),
@@ -200,7 +203,9 @@ class Orchestrator(policy.Policy):
     def solve(self):
         """Solution logic for Deep CFR."""
         advantage_losses = collections.defaultdict(list)
-        
+        wandb_config = {"lr": self._learning_rate, "batch_size": self._batch_size_advantage, "memory_capacity": self.memory_capacity, "policy_network_train_steps": self._policy_network_train_steps, "advantage_network_train_steps": self._advantage_network_train_steps, "num_actors": self.num_actors, "num_traversals": self._num_traversals, "num_iterations": self._num_iterations, "evaluation_interval": self.evaluation_interval, "num_players": self._num_players, "policy_network_layers": self.policy_network_layers, "advantage_network_layers": self.advantage_network_layers, "reinitialize_advantage_networks": self._reinitialize_advantage_networks}   
+        run = wandb.init(project="deep_cfr_ray", config=wandb_config)
+        running_return = 0
         for i in tqdm(range(self._num_iterations), desc="CFR Iterations"):
             for p in tqdm(range(self._num_players), desc=f"Iteration {i} Players"):
                 # Initialize actors with current network state
@@ -238,7 +243,13 @@ class Orchestrator(policy.Policy):
                 print(f"Advantage loss for player {p}: {advantage_losses[p][-1]}")
             if i % self.evaluation_interval == 0:
                 print(f"Evaluation at iteration {i}")
-                print(self.evaluate_agent())
+                player0_return, player1_return = self.evaluate_agent()
+                running_return -= player1_return
+                exploitability = self.calculate_exploitability()
+                print(f"Player 0 return: {player0_return}")
+                print(f"Player 1 return: {player1_return}")
+                print(f"Exploitability: {exploitability}")
+                run.log({"player_0_running_score": running_return, "exploitability": exploitability})
         policy_loss = self._learn_strategy_network()
         
         
@@ -315,7 +326,11 @@ class Orchestrator(policy.Policy):
     @property
     def strategy_buffer(self):
         return self._strategy_memories
-
+    def calculate_exploitability(self):
+        """Compute exploitability of the policy."""
+        policy = policy_module.tabular_policy_from_callable(self.game, self.action_probabilities)
+        return exploitability.nash_conv(self.game, policy)
+    
     def _learn_advantage_network(self, player):
         """Optimized advantage network training with pre-allocated arrays."""
         for step in tqdm(range(self._advantage_network_train_steps), desc=f"Training advantage network for player {player}"):
@@ -391,20 +406,20 @@ if __name__ == "__main__":
     num_actors = max(1, int(num_cpus) - 1)
 
     solver = Orchestrator(
-        game,
-policy_network_layers=(64,),
-advantage_network_layers=(64,),
-num_iterations=200,
-num_traversals=375,
-reinitialize_advantage_networks=True,
-learning_rate=1e-3,
-batch_size_advantage=256,
-batch_size_strategy=256,
-memory_capacity=1000000,
-policy_network_train_steps=2500,
-advantage_network_train_steps=375,
-evaluation_interval=10,
-num_actors=1
+    game,
+    policy_network_layers=(64,),
+    advantage_network_layers=(64,),
+    num_iterations=100,
+    num_traversals=1500,
+    reinitialize_advantage_networks=True,
+    learning_rate=1e-3,
+    batch_size_advantage=2048,
+    batch_size_strategy=2048,
+    memory_capacity=1e6,
+    policy_network_train_steps=5000,
+    advantage_network_train_steps=750,
+    evaluation_interval=5,
+    num_actors=num_actors
     )
     _, advantage_losses, policy_loss = solver.solve()
     
