@@ -19,24 +19,21 @@ class DeepCFRActor:
     def __init__(self, game, advantage_networks_refs, num_traversals_per_actor):
         self.game = game
         self._num_actions = game.num_distinct_actions()
-        
+        self.strategy_data = []
+        self.advantage_data = []
         self.num_traversals_per_actor = num_traversals_per_actor
         self.num_distinct_actions = game.num_distinct_actions()
         self._embedding_size = len(game.new_initial_state().information_state_tensor(0))
-        self.advantage_data = []
-        self.strategy_data = []
         # Create local copies of advantage networks
         self.advantage_networks = ray.get(advantage_networks_refs)
 
     def batch_traverse_tree_tasks(self, player, iteration):
         """Perform multiple traversals and collect data locally before adding to shared memory."""
-        
         for _ in range(self.num_traversals_per_actor):
             state = self.game.new_initial_state()
             self._traverse_game_tree(state, player, iteration)
-        advantage_data_ref = ray.put(self.advantage_data)
-        strategy_data_ref = ray.put(self.strategy_data)
-        return advantage_data_ref, strategy_data_ref
+            
+        return self.advantage_data,self.strategy_data
 
     def _traverse_game_tree(self, state, player, iteration):
       """Performs a traversal of the game tree.
@@ -77,8 +74,8 @@ class DeepCFRActor:
         for action in sampled_regret:
           sampled_regret_arr[action] = sampled_regret[action]
         self.advantage_data.append(
-            AdvantageMemory(state.information_state_tensor(), iteration,
-                            sampled_regret_arr))
+            AdvantageMemory(np.array(state.information_state_tensor()), np.array(iteration),
+                            np.array(sampled_regret_arr)))
         return cfv
       else:
         other_player = state.current_player()
@@ -89,8 +86,8 @@ class DeepCFRActor:
         sampled_action = np.random.choice(range(self._num_actions), p=probs)
         self.strategy_data.append(
           StrategyMemory(
-              state.information_state_tensor(other_player), iteration,
-              strategy))
+              np.array(state.information_state_tensor(other_player)), np.array(iteration),
+              np.array(strategy)))
         return self._traverse_game_tree(state.child(sampled_action), player, iteration)
 
     def _sample_action_from_advantage(self, state, player):
@@ -202,11 +199,13 @@ class Orchestrator(policy.Policy):
         for actor in self.actors:
             ray.kill(actor)
     
-    def solve(self):
+    def solve(self, use_wandb = False):
         """Solution logic for Deep CFR."""
         advantage_losses = collections.defaultdict(list)
         wandb_config = {"lr": self._learning_rate, "batch_size": self._batch_size_advantage, "memory_capacity": self.memory_capacity, "policy_network_train_steps": self._policy_network_train_steps, "advantage_network_train_steps": self._advantage_network_train_steps, "num_actors": self.num_actors, "num_traversals": self._num_traversals, "num_iterations": self._num_iterations, "evaluation_interval": self.evaluation_interval, "num_players": self._num_players, "policy_network_layers": self.policy_network_layers, "advantage_network_layers": self.advantage_network_layers, "reinitialize_advantage_networks": self._reinitialize_advantage_networks}   
-        run = wandb.init(project="deep_cfr_ray", config=wandb_config)
+        
+        if use_wandb:
+            run = wandb.init(project="deep_cfr_ray", config=wandb_config)
         running_return = 0
         for i in tqdm(range(self._num_iterations), desc="CFR Iterations"):
             for p in tqdm(range(self._num_players), desc=f"Iteration {i} Players"):
@@ -252,7 +251,8 @@ class Orchestrator(policy.Policy):
                 print(f"Player 1 return: {player1_return}")
                 print(f"Exploitability: {exploitability}")
                 self.save_memories()
-                run.log({"player_0_running_score": running_return, "exploitability": exploitability, "visited_unique_info_states": len(self.unique_info_states)})
+                if use_wandb:
+                    run.log({"player_0_running_score": running_return, "exploitability": exploitability, "visited_unique_info_states": len(self.unique_info_states)})
         policy_loss = self._learn_strategy_network()
         
         
@@ -293,6 +293,8 @@ class Orchestrator(policy.Policy):
                     action = np.random.choice(chance_outcome, p=chance_proba)
                 elif state.current_player() == 0:
                     action = self.action_probabilities(state)
+                    # renormalize 
+                    action = {k: v / sum(action.values()) for k, v in action.items()}
                     action = np.random.choice(list(action.keys()), p=list(action.values()))
                 else:
                     # take random action
@@ -441,7 +443,7 @@ if __name__ == "__main__":
     evaluation_interval=5,
     num_actors=num_actors
     )
-    _, advantage_losses, policy_loss = solver.solve()
+    _, advantage_losses, policy_loss = solver.solve(use_wandb=False)
     
     for player, losses in list(advantage_losses.items()):
         print("Advantage for player:", player,
