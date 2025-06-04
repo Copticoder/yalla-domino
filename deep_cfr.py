@@ -37,7 +37,7 @@ from open_spiel.python import policy
 import pyspiel
 
 AdvantageMemory = collections.namedtuple(
-    "AdvantageMemory", "info_state iteration advantage action")
+    "AdvantageMemory", "info_state iteration advantage")
 
 StrategyMemory = collections.namedtuple(
     "StrategyMemory", "info_state iteration strategy_action_probs")
@@ -340,6 +340,8 @@ class DeepCFRSolver(policy.Policy):
       # Train policy network.
     policy_loss = self._learn_strategy_network()
     return self._policy_network, advantage_losses, policy_loss
+  
+  
 
   def _traverse_game_tree(self, state, player):
     """Performs a traversal of the game tree.
@@ -381,7 +383,7 @@ class DeepCFRSolver(policy.Policy):
         sampled_regret_arr[action] = sampled_regret[action]
       self._advantage_memories[player].add(
           AdvantageMemory(state.information_state_tensor(), self._iteration,
-                          sampled_regret_arr, action))
+                          sampled_regret_arr))
       return cfv
     else:
       other_player = state.current_player()
@@ -453,7 +455,7 @@ class DeepCFRSolver(policy.Policy):
     Returns:
       (float) The average loss over the advantage network.
     """
-    for _ in range(self._advantage_network_train_steps):
+    for k in tqdm(range(self._advantage_network_train_steps), desc="Training advantage network"):
 
       if self._batch_size_advantage:
         if self._batch_size_advantage > len(self._advantage_memories[player]):
