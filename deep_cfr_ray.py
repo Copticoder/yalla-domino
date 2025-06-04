@@ -222,10 +222,8 @@ class Orchestrator(policy.Policy):
                     
                     # Get the results from completed tasks
                     for done_id in done_ids:
-                        advantage_data_ref, strategy_data_ref = ray.get(done_id)
+                        advantage_data, strategy_data = ray.get(done_id)
                         # Get actual data from references
-                        advantage_data = ray.get(advantage_data_ref)
-                        strategy_data = ray.get(strategy_data_ref)
                         
                         # Add data to memories
                         for data in advantage_data:
