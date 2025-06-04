@@ -1,4 +1,5 @@
 import itertools
+import os
 from open_spiel.python import policy as policy_module
 from open_spiel.python.algorithms import exploitability
 import ray
@@ -12,6 +13,7 @@ from deep_cfr import MLP, ReservoirBuffer, StrategyMemory, AdvantageMemory
 from open_spiel.python import policy
 from tqdm import tqdm
 import wandb
+import pickle
 @ray.remote
 class DeepCFRActor:
     def __init__(self, game, advantage_networks_refs, num_traversals_per_actor):
@@ -181,7 +183,7 @@ class Orchestrator(policy.Policy):
             self._optimizer_advantages.append(
                 torch.optim.Adam(
                     self._advantage_networks[p].parameters(), lr=learning_rate))
-
+        self.unique_info_states = set()
     def _initialize_actors(self):
         """Initialize actors with current network parameters"""
         # Calculate traversals per actor
@@ -229,9 +231,9 @@ class Orchestrator(policy.Policy):
                         # Add data to memories
                         for data in advantage_data:
                             self._advantage_memories[p].add(data)
+                            self.unique_info_states.add(tuple(data.info_state))
                         for data in strategy_data:
                             self._strategy_memories.add(data)
-
                 # Reinitialize advantage networks
                 if self._reinitialize_advantage_networks:
                     self.reinitialize_advantage_network(p)
@@ -249,7 +251,8 @@ class Orchestrator(policy.Policy):
                 print(f"Player 0 return: {player0_return}")
                 print(f"Player 1 return: {player1_return}")
                 print(f"Exploitability: {exploitability}")
-                run.log({"player_0_running_score": running_return, "exploitability": exploitability})
+                self.save_memories()
+                run.log({"player_0_running_score": running_return, "exploitability": exploitability, "visited_unique_info_states": len(self.unique_info_states)})
         policy_loss = self._learn_strategy_network()
         
         
@@ -260,6 +263,22 @@ class Orchestrator(policy.Policy):
         self._advantage_networks[player].reset()
         self._optimizer_advantages[player] = torch.optim.Adam(
             self._advantage_networks[player].parameters(), lr=self._learning_rate)
+    
+    def save_memories(self):
+        #mkdir if not there 
+        os.makedirs(f"./memories", exist_ok=True)
+        # save the advantage memories and strategy memories to a file
+        with open(f"./memories/advantage_memories.pkl", "wb") as f:
+            pickle.dump(self._advantage_memories, f, pickle.HIGHEST_PROTOCOL)
+        with open(f"./memories/strategy_memories.pkl", "wb") as f:
+            pickle.dump(self._strategy_memories, f, pickle.HIGHEST_PROTOCOL)
+            
+    def load_memories(self):
+        # load the advantage memories and strategy memories from a file using ray
+        with open(f"./memories/advantage_memories.pkl", "rb") as f:
+            self._advantage_memories = pickle.load(f)
+        with open(f"./memories/strategy_memories.pkl", "rb") as f:
+            self._strategy_memories = pickle.load(f)
         
     def evaluate_agent(self, num_episodes=100):
         """evaluate the agent on the game against a random agent"""
@@ -274,9 +293,7 @@ class Orchestrator(policy.Policy):
                     action = np.random.choice(chance_outcome, p=chance_proba)
                 elif state.current_player() == 0:
                     action = self.action_probabilities(state)
-                    # take the action with highest probability
-                    action = np.argmax(list(action.values()))
-                    action = state.legal_actions()[action]
+                    action = np.random.choice(list(action.keys()), p=list(action.values()))
                 else:
                     # take random action
                     action = np.random.choice(state.legal_actions())
@@ -284,6 +301,8 @@ class Orchestrator(policy.Policy):
             player_0_returns = np.append(player_0_returns, state.returns()[0])
             player_1_returns = np.append(player_1_returns, state.returns()[1])
         return np.sum(player_0_returns) / num_episodes, np.sum(player_1_returns) / num_episodes
+    
+    
     def _learn_strategy_network(self):
         """Compute the loss over the strategy network."""
         for step in tqdm(range(self._policy_network_train_steps), desc="Training policy network"):
@@ -326,6 +345,7 @@ class Orchestrator(policy.Policy):
     @property
     def strategy_buffer(self):
         return self._strategy_memories
+    
     def calculate_exploitability(self):
         """Compute exploitability of the policy."""
         policy = policy_module.tabular_policy_from_callable(self.game, self.action_probabilities)
@@ -407,9 +427,9 @@ if __name__ == "__main__":
 
     solver = Orchestrator(
     game,
-    policy_network_layers=(64,),
-    advantage_network_layers=(64,),
-    num_iterations=100,
+    policy_network_layers=(64,64,64),
+    advantage_network_layers=(64,64,64),
+    num_iterations=200,
     num_traversals=1500,
     reinitialize_advantage_networks=True,
     learning_rate=1e-3,
