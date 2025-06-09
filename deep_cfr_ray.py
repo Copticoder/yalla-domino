@@ -16,7 +16,7 @@ import wandb
 import pickle
 @ray.remote
 class DeepCFRActor:
-    def __init__(self, game, advantage_network, num_traversals_per_actor, memory_capacity, player, batch_size_advantage):
+    def __init__(self, game, advantage_network, num_traversals_per_actor, memory_capacity, player, batch_size_advantage, batch_size_strategy):
         self.game = game
         self._num_actions = game.num_distinct_actions()
         self.num_traversals_per_actor = num_traversals_per_actor
@@ -32,13 +32,47 @@ class DeepCFRActor:
         self.player = player
         self.loss_advantages = nn.MSELoss(reduction="mean")
         self.batch_size_advantage = batch_size_advantage
+        self.batch_size_strategy = batch_size_strategy
     def batch_traverse_solve_game(self, iteration):
         """Perform multiple traversals and collect data locally before adding to shared memory."""
         for _ in range(self.num_traversals_per_actor):
             state = self.game.new_initial_state()
             self._traverse_game_tree(state, iteration)
-        return self._learn_advantage_network()
+        return self.advantage_network_step()
+    
+    def policy_network_step(self, policy_network):
+        """Begin policy network training."""
+        if self.batch_size_strategy:
+            strategy_memory_size = len(self._strategy_memories)
+            if self.batch_size_strategy > strategy_memory_size:
+                return None
+            samples = self._strategy_memories.sample(self.batch_size_strategy)
+        else:
+            memory_size = len(self._strategy_memories)
+            if memory_size == 0:
+                return None
+            samples = self._strategy_memories.sample(memory_size)
         
+        if not samples:
+            return None
+        
+        info_states = []
+        action_probs = []
+        iterations = []
+        for s in samples:
+            info_states.append(s.info_state)
+            action_probs.append(s.strategy_action_probs)
+            iterations.append([s.iteration])
+
+        policy_network.zero_grad()
+        iters = torch.FloatTensor(np.sqrt(np.array(iterations)))
+        ac_probs = torch.FloatTensor(np.array(np.squeeze(action_probs)))
+        logits = self._policy_network(torch.FloatTensor(np.array(info_states)))
+        outputs = self._policy_sm(logits)
+        loss_strategy = self._loss_policy(iters * outputs, iters * ac_probs)
+        loss_strategy.backward()
+        # here we need to return the gradients to be aggregated at the parameter server
+        return [p.grad.clone() for p in policy_network.parameters()], loss_strategy.detach().numpy()
         # here learn the advantage network
     def _traverse_game_tree(self, state, iteration):
       """Performs a traversal of the game tree.
@@ -117,7 +151,7 @@ class DeepCFRActor:
             
         return advantages, matched_regrets
     
-    def _learn_advantage_network(self):
+    def advantage_network_step(self):
         """Optimized advantage network training with pre-allocated arrays."""
         # a = time.time()
         if self.batch_size_advantage:
@@ -161,7 +195,7 @@ class DeepCFRActor:
         loss_advantages.backward()
         # get the gradients to be aggregated at the parameter server
         return [p.grad.clone() for p in self.advantage_network.parameters()], self.player, loss_advantages.detach().numpy()
-    
+
 class Orchestrator:
     def __init__(self, game, policy_network_layers=(256, 256), 
                  advantage_network_layers=(128, 128),
@@ -187,10 +221,21 @@ class Orchestrator:
         self.batch_size_strategy = batch_size_strategy
         self.num_actors = num_actors
         # create the parameter servers for each player 
-        self.parameter_servers = [ParameterServer(game, policy_network_layers, advantage_network_layers, num_iterations, learning_rate, policy_network_train_steps, advantage_network_train_steps, player) for player in range(self.game.num_players())]
+        self.policy_network_train_steps = policy_network_train_steps
+        self.parameter_servers = [ParameterServer(game, policy_network_layers, advantage_network_layers, learning_rate, player) for player in range(self.game.num_players())]
         self.memory_capacity = memory_capacity
         self.reinitialize_advantage_networks = reinitialize_advantage_networks
-    
+        self.evaluation_interval = evaluation_interval
+        self._embedding_size = len(self.game.new_initial_state().information_state_tensor(0))
+        self._num_actions = self.game.num_distinct_actions()
+        self._policy_network = MLP(self._embedding_size,
+                                  list(policy_network_layers),
+                                  self._num_actions)
+        self._policy_sm = nn.Softmax(dim=-1)
+        self._loss_policy = nn.MSELoss()
+        self._optimizer_policy = torch.optim.Adam(
+            self._policy_network.parameters(), lr=learning_rate)
+        self._policy_network_ref = ray.put(self._policy_network)
     def _initialize_actors(self, num_actors):
         """Initialize actors with current network parameters"""
         # Calculate traversals per actor
@@ -236,55 +281,90 @@ class Orchestrator:
             # aggregate gradients
             for parameter_server in self.parameter_servers:
                 parameter_server.aggregate_gradients()
-            breakpoint()
+            # breakpoint()
             for player in range(self.game.num_players()):
                 advantage_losses[player].append(np.mean(aggregated_losses[player]))
                 self.parameter_servers[player]._advantage_network_ref = ray.put(self.parameter_servers[player]._advantage_network)
-
+            if i % self.evaluation_interval == 0:
+                for _ in range(self.policy_network_train_steps):
+                    gradients, loss = [actor.policy_network_step.remote(self._policy_network) for actor in self.actors]
+                    gradients = ray.get(gradients)
+                    loss = ray.get(loss)
+                    self._policy_network.zero_grad()
+                    for p, g in zip(self._policy_network.parameters(), gradients):
+                        p.grad = g
+                    self._optimizer_policy.step()
             print(f"Advantage loss for player {player}: {advantage_losses[player][-1]}")
-        if i % self.evaluation_interval == 0:
-            print(f"Evaluation at iteration {i}")
-            player0_return, player1_return = self.evaluate_agent()
-            running_return -= player1_return
-            exploitability = self.calculate_exploitability()
-            print(f"Player 0 return: {player0_return}")
-            print(f"Player 1 return: {player1_return}")
-            print(f"Exploitability: {exploitability}")
-            self.save_memories()
-            if use_wandb:
-                run.log({"player_0_running_score": running_return, "exploitability": exploitability, "visited_unique_info_states": len(self.unique_info_states)})
-        policy_loss = self._learn_strategy_network()
-        
-        
+
         return self._policy_network, advantage_losses, policy_loss
+            
+    def evaluate_agent(self, num_episodes=100):
+        """evaluate the agent on the game against a random agent"""
+        self.policy_network_step()
+        player_0_returns = np.array([])
+        player_1_returns = np.array([])
+        for _ in tqdm(range(num_episodes), desc="Evaluating agent"):
+            state = self._game.new_initial_state()
+            while not state.is_terminal():
+                if state.is_chance_node():
+                    chance_outcome, chance_proba = zip(*state.chance_outcomes())
+                    action = np.random.choice(chance_outcome, p=chance_proba)
+                elif state.current_player() == 0:
+                    action = self.action_probabilities(state)
+                    # renormalize 
+                    action = {k: v / sum(action.values()) for k, v in action.items()}
+                    action = np.random.choice(list(action.keys()), p=list(action.values()))
+                else:
+                    # take random action
+                    action = np.random.choice(state.legal_actions())
+                state = state.child(action)
+            player_0_returns = np.append(player_0_returns, state.returns()[0])
+            player_1_returns = np.append(player_1_returns, state.returns()[1])
+        return np.sum(player_0_returns) / num_episodes, np.sum(player_1_returns) / num_episodes
+    
+
+    @property
+    def advantage_buffers(self):
+        return self._advantage_memories
+
+    @property
+    def strategy_buffer(self):
+        return self._strategy_memories
+    
+    def calculate_exploitability(self):
+        """Compute exploitability of the policy."""
+        policy = policy_module.tabular_policy_from_callable(self.game, self.action_probabilities)
+        return exploitability.nash_conv(self.game, policy)
+    
+   
+    def action_probabilities(self, state):
+        """Computes action probabilities for the current player in state."""
+        cur_player = state.current_player()
+        legal_actions = state.legal_actions(cur_player)
+        info_state_vector = np.array(state.information_state_tensor())
+        if len(info_state_vector.shape) == 1:
+            info_state_vector = np.expand_dims(info_state_vector, axis=0)
+        with torch.no_grad():
+            logits = self._policy_network(torch.FloatTensor(info_state_vector))
+            probs = self._policy_sm(logits).numpy()
+        return {action: probs[0][action] for action in legal_actions}
+
 class ParameterServer(policy.Policy):
     def __init__(self,game, policy_network_layers=(256, 256),
                  advantage_network_layers=(128, 128),
-                 num_iterations: int = 100,
                  learning_rate: float = 1e-4,
-                 policy_network_train_steps: int = 1,
-                 advantage_network_train_steps: int = 1,
                 player: int = 0
                 ):
         self.game = game
         self._root_node = self.game.new_initial_state()
 
-        self._policy_network_train_steps = policy_network_train_steps
-        self._advantage_network_train_steps = advantage_network_train_steps
         self._embedding_size = len(self._root_node.information_state_tensor(0))
-        self._num_iterations = num_iterations
         self._num_actions = self.game.num_distinct_actions()
         self._learning_rate = learning_rate
         self.player = player
         # Store advantage network layer configuration to pass to actors
         self._advantage_network_layers_list = list(advantage_network_layers)
-        self._policy_network = MLP(self._embedding_size,
-                                  list(policy_network_layers),
-                                  self._num_actions)
-        self._policy_sm = nn.Softmax(dim=-1)
-        self._loss_policy = nn.MSELoss()
-        self._optimizer_policy = torch.optim.Adam(
-            self._policy_network.parameters(), lr=learning_rate)
+
 
         self._advantage_network = MLP(self._embedding_size, self._advantage_network_layers_list, # Use the stored list
                 self._num_actions)
@@ -329,92 +409,6 @@ class ParameterServer(policy.Policy):
             self._advantage_memories = pickle.load(f)
         with open(f"./memories/strategy_memories.pkl", "rb") as f:
             self._strategy_memories = pickle.load(f)
-        
-    def evaluate_agent(self, num_episodes=100):
-        """evaluate the agent on the game against a random agent"""
-        self._learn_strategy_network()
-        player_0_returns = np.array([])
-        player_1_returns = np.array([])
-        for _ in tqdm(range(num_episodes), desc="Evaluating agent"):
-            state = self._game.new_initial_state()
-            while not state.is_terminal():
-                if state.is_chance_node():
-                    chance_outcome, chance_proba = zip(*state.chance_outcomes())
-                    action = np.random.choice(chance_outcome, p=chance_proba)
-                elif state.current_player() == 0:
-                    action = self.action_probabilities(state)
-                    # renormalize 
-                    action = {k: v / sum(action.values()) for k, v in action.items()}
-                    action = np.random.choice(list(action.keys()), p=list(action.values()))
-                else:
-                    # take random action
-                    action = np.random.choice(state.legal_actions())
-                state = state.child(action)
-            player_0_returns = np.append(player_0_returns, state.returns()[0])
-            player_1_returns = np.append(player_1_returns, state.returns()[1])
-        return np.sum(player_0_returns) / num_episodes, np.sum(player_1_returns) / num_episodes
-    
-    
-    def _learn_strategy_network(self):
-        """Compute the loss over the strategy network."""
-        for step in tqdm(range(self._policy_network_train_steps), desc="Training policy network"):
-            if self._batch_size_strategy:
-                strategy_memory_size = len(self._strategy_memories)
-                if self._batch_size_strategy > strategy_memory_size:
-                    return None
-                samples = self._strategy_memories.sample(self._batch_size_strategy)
-            else:
-                memory_size = len(self._strategy_memories)
-                if memory_size == 0:
-                    return None
-                samples = self._strategy_memories.sample(memory_size)
-            
-            if not samples:
-                return None
-            
-            info_states = []
-            action_probs = []
-            iterations = []
-            for s in samples:
-                info_states.append(s.info_state)
-                action_probs.append(s.strategy_action_probs)
-                iterations.append([s.iteration])
-
-            self._optimizer_policy.zero_grad()
-            iters = torch.FloatTensor(np.sqrt(np.array(iterations)))
-            ac_probs = torch.FloatTensor(np.array(np.squeeze(action_probs)))
-            logits = self._policy_network(torch.FloatTensor(np.array(info_states)))
-            outputs = self._policy_sm(logits)
-            loss_strategy = self._loss_policy(iters * outputs, iters * ac_probs)
-            loss_strategy.backward()
-            self._optimizer_policy.step()
-        return loss_strategy.detach().numpy()
-
-    @property
-    def advantage_buffers(self):
-        return self._advantage_memories
-
-    @property
-    def strategy_buffer(self):
-        return self._strategy_memories
-    
-    def calculate_exploitability(self):
-        """Compute exploitability of the policy."""
-        policy = policy_module.tabular_policy_from_callable(self.game, self.action_probabilities)
-        return exploitability.nash_conv(self.game, policy)
-    
-   
-    def action_probabilities(self, state):
-        """Computes action probabilities for the current player in state."""
-        cur_player = state.current_player()
-        legal_actions = state.legal_actions(cur_player)
-        info_state_vector = np.array(state.information_state_tensor())
-        if len(info_state_vector.shape) == 1:
-            info_state_vector = np.expand_dims(info_state_vector, axis=0)
-        with torch.no_grad():
-            logits = self._policy_network(torch.FloatTensor(info_state_vector))
-            probs = self._policy_sm(logits).numpy()
-        return {action: probs[0][action] for action in legal_actions}
 
 if __name__ == "__main__":
     try:
@@ -426,7 +420,7 @@ if __name__ == "__main__":
         runtime_env={"env_vars": {"RAY_DEBUG": "1"}},
         ignore_reinit_error=True,
     )
-    game = pyspiel.load_game('leduc_poker')
+    game = pyspiel.load_game('kuhn_poker')
     # Get number of available CPUs for Ray actors
     num_cpus = ray.cluster_resources()['CPU']
     # Leave 1 CPU for the main process
@@ -436,7 +430,7 @@ if __name__ == "__main__":
     game,
     policy_network_layers=(64,64,64),
     advantage_network_layers=(64,64,64),
-    num_iterations=101,
+    num_iterations=1,
     num_traversals=5000,
     reinitialize_advantage_networks=True,
     learning_rate=1e-3,
