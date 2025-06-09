@@ -32,7 +32,6 @@ class DeepCFRActor:
         for _ in range(self.num_traversals_per_actor):
             state = self.game.new_initial_state()
             self._traverse_game_tree(state, player, iteration)
-            
         return self.advantage_data,self.strategy_data
 
     def _traverse_game_tree(self, state, player, iteration):
@@ -354,6 +353,7 @@ class Orchestrator(policy.Policy):
     def _learn_advantage_network(self, player):
         """Optimized advantage network training with pre-allocated arrays."""
         for step in tqdm(range(self._advantage_network_train_steps), desc=f"Training advantage network for player {player}"):
+            # a = time.time()
             if self._batch_size_advantage:
                 memory_size = len(self._advantage_memories[player])
                 if self._batch_size_advantage > memory_size:
@@ -367,8 +367,9 @@ class Orchestrator(policy.Policy):
           
             if not samples:
                 return None
-            
+            # print("time to sample: ", time.time()-a)
             # Pre-allocate numpy arrays for better performance
+            # a = time.time()
             batch_size = len(samples)
             info_state_size = len(samples[0].info_state)
             advantage_size = len(samples[0].advantage)
@@ -388,13 +389,14 @@ class Orchestrator(policy.Policy):
             advantages_tensor = torch.from_numpy(advantages)
             iters_tensor = torch.from_numpy(np.sqrt(iterations))
             states_tensor = torch.from_numpy(info_states)
-            
+            # print("preparing data: ", time.time()-a)
+            # a = time.time()
             outputs = self._advantage_networks[player](states_tensor)
             loss_advantages = self._loss_advantages(iters_tensor * outputs,
                                                   iters_tensor * advantages_tensor)
             loss_advantages.backward()
             self._optimizer_advantages[player].step()
-
+            # print("training: ", time.time()-a)
         return loss_advantages.detach().numpy()
     
     def action_probabilities(self, state):
@@ -429,8 +431,8 @@ if __name__ == "__main__":
     game,
     policy_network_layers=(64,64,64),
     advantage_network_layers=(64,64,64),
-    num_iterations=200,
-    num_traversals=1500,
+    num_iterations=101,
+    num_traversals=5000,
     reinitialize_advantage_networks=True,
     learning_rate=1e-3,
     batch_size_advantage=2048,
@@ -441,7 +443,7 @@ if __name__ == "__main__":
     evaluation_interval=5,
     num_actors=num_actors
     )
-    _, advantage_losses, policy_loss = solver.solve(use_wandb=False)
+    _, advantage_losses, policy_loss = solver.solve(use_wandb=True)
     
     for player, losses in list(advantage_losses.items()):
         print("Advantage for player:", player,
