@@ -47,7 +47,6 @@ class Orchestrator:
                                   self._num_actions)
         self._optimizer_policy = torch.optim.Adam(
             self._policy_network.parameters(), lr=learning_rate)
-        self._policy_network_ref = ray.put(self._policy_network)
         self.advantage_network_train_steps = advantage_network_train_steps
         
         wandb_config = {"lr": self.learning_rate, "batch_size": self.batch_size_advantage, "memory_capacity": self.memory_capacity, "policy_network_train_steps": self.policy_network_train_steps, "advantage_network_train_steps": self.advantage_network_train_steps, "num_actors": self.num_actors, "num_traversals": self.num_traversals, "num_iterations": self.num_iterations, "evaluation_interval": self.evaluation_interval, "num_players": self.game.num_players(), "policy_network_layers": self.policy_network_layers, "advantage_network_layers": self.advantage_network_layers, "reinitialize_advantage_networks": self.reinitialize_advantage_networks}   
@@ -120,11 +119,13 @@ class Orchestrator:
                 for plyr in range(self.game.num_players()):
                     if gradient_buffer[plyr]:
                         self.parameter_servers[plyr].aggregate_gradients.remote(gradient_buffer[plyr])
-
+            
             for player in range(self.game.num_players()):
+                # save the advantage networks
+                self.parameter_servers[player].save_advantage_network.remote(f"./networks/advantage_network_{player}.pth")
                 advantage_losses[player].append(np.mean(aggregated_losses[player]))
                 self.parameter_servers[player].put_network.remote()
-            
+                
             for player in range(self.game.num_players()):
                 print(f"Advantage loss for player {player}: {advantage_losses[player][-1]}")
                 
@@ -132,6 +133,3 @@ class Orchestrator:
                 policy_losses = self.evaluator.evaluate(len(unique_info_states))
 
         return self._policy_network, advantage_losses, policy_losses, unique_info_states
-    
-
-    

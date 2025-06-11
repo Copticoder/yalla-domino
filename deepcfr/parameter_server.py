@@ -67,3 +67,11 @@ class ParameterServer():
             self._advantage_memories = pickle.load(f)
         with open(f"./memories/strategy_memories.pkl", "rb") as f:
             self._strategy_memories = pickle.load(f)
+    
+    def save_advantage_network(self, path):
+        torch.save(self._advantage_network.state_dict(), path)
+        return True
+
+    def load_advantage_network(self, path):
+        self._advantage_network.load_state_dict(torch.load(path))
+        return True
