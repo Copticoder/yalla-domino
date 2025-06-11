@@ -3,7 +3,6 @@ from open_spiel.python.algorithms import exploitability
 import ray
 import torch
 import numpy as np
-from deep_cfr import MLP
 from tqdm import tqdm
 import torch.nn as nn
 
