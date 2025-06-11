@@ -28,9 +28,9 @@ class Evaluator(policy_module.Policy):
         if self.game.get_type().short_name != "python_block_dominoes":
             policy = policy_module.tabular_policy_from_callable(self.game, self.action_probabilities)
             conv = exploitability.nash_conv(self.game, policy)
+            print("Deep CFR - NashConv:", conv)  
         self._policy_network.reset()
         self._optimizer_policy = torch.optim.Adam(self._policy_network.parameters(), lr=self.learning_rate)
-        print("Deep CFR - NashConv:", conv)  
         if self.wandb_run:
             self.wandb_run.log({"nash_conv": conv, "visited_unique_info_states": num_unique_info_states, "player_0_running_score": player_0_returns-player_1_returns})
         self.save_policy_network("./networks/policy_network.pth")
@@ -40,7 +40,7 @@ class Evaluator(policy_module.Policy):
         """Train the policy network via gradient aggregation across all actors."""
         policy_losses = []
 
-        for _ in range(self.policy_network_train_steps):
+        for _ in tqdm(range(self.policy_network_train_steps), desc="Training policy network"):
             # Collect gradients and losses from ALL actors of BOTH players.
             remote_tasks = []
             for player in range(self.game.num_players()):
@@ -68,7 +68,6 @@ class Evaluator(policy_module.Policy):
             for param, grad in zip(self._policy_network.parameters(), averaged_grads):
                 param.grad = grad
             self._optimizer_policy.step()
-
         return policy_losses
     
     def evaluate_agent(self, num_episodes=100):

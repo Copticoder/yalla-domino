@@ -95,7 +95,7 @@ class Orchestrator:
             output = ray.get(traversal_tasks)
             # from every actor, we need to get the unique info states
             unique_info_states = unique_info_states.union(*output)
-            for _ in range(self.advantage_network_train_steps):
+            for _ in tqdm(range(self.advantage_network_train_steps), desc="Training advantage networks"):
                 outputs = []
                 for player in range(self.game.num_players()):
                     actors = [ray.get_actor(f"actor_{player}_{i}", namespace="deep_cfr")
@@ -119,7 +119,6 @@ class Orchestrator:
                 for plyr in range(self.game.num_players()):
                     if gradient_buffer[plyr]:
                         self.parameter_servers[plyr].aggregate_gradients.remote(gradient_buffer[plyr])
-            
             for player in range(self.game.num_players()):
                 # save the advantage networks
                 self.parameter_servers[player].save_advantage_network.remote(f"./networks/advantage_network_{player}.pth")

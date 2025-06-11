@@ -17,7 +17,7 @@ if __name__ == "__main__":
         runtime_env={"env_vars": {"RAY_DEBUG": "1"}},
         ignore_reinit_error=True,
     )
-    game = pyspiel.load_game("leduc_poker")
+    game = pyspiel.load_game("python_block_dominoes")
     # Get number of available CPUs for Ray actors
     num_cpus = ray.cluster_resources()['CPU']
     # Leave 1 CPU for the main process
@@ -27,18 +27,18 @@ if __name__ == "__main__":
     game,
     policy_network_layers=(256,64,64),
     advantage_network_layers=(256,64,64),
-    num_iterations=200,
-    num_traversals=1500,
+    num_iterations=300,
+    num_traversals=1000,
     reinitialize_advantage_networks=True,
     learning_rate=1e-3,
     batch_size_advantage=384,
     batch_size_strategy=384,
     memory_capacity=1e6,
-    policy_network_train_steps=5000,
-    advantage_network_train_steps=750,
+    policy_network_train_steps=1,
+    advantage_network_train_steps=1,
     evaluation_interval=5,
     num_actors=num_actors,
-    use_wandb=True
+    use_wandb=False
     )
     _, advantage_losses, policy_loss = solver.solve()
     

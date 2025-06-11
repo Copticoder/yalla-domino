@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 from deep_cfr import ReservoirBuffer, StrategyMemory, AdvantageMemory
-
 @ray.remote
 class DeepCFRActor:
     def __init__(self, game, num_traversals_per_actor, memory_capacity, batch_size_advantage, batch_size_strategy, player):
@@ -42,7 +41,6 @@ class DeepCFRActor:
             state = self.game.new_initial_state()
             # We will traverse for *this* actor's player id (self.player).
             self._traverse_game_tree(state, iteration, self.player)
-
         return self.unique_info_states
     
     def policy_network_step(self, policy_network):
