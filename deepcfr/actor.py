@@ -7,7 +7,7 @@ from deep_cfr import ReservoirBuffer, StrategyMemory, AdvantageMemory
 
 @ray.remote
 class DeepCFRActor:
-    def __init__(self, game, num_traversals_per_actor, memory_capacity, batch_size_advantage, batch_size_strategy, policy_sm, loss_policy, player):
+    def __init__(self, game, num_traversals_per_actor, memory_capacity, batch_size_advantage, batch_size_strategy, player):
         self.game = game
         self._num_actions = game.num_distinct_actions()
         self.num_traversals_per_actor = num_traversals_per_actor
@@ -21,8 +21,8 @@ class DeepCFRActor:
         self.loss_advantages = nn.MSELoss(reduction="mean")
         self.batch_size_advantage = batch_size_advantage
         self.batch_size_strategy = batch_size_strategy
-        self.policy_sm = policy_sm
-        self.loss_policy = loss_policy
+        self.policy_sm = nn.Softmax(dim=-1)
+        self.loss_policy = nn.MSELoss()
         self.player = player
     def batch_traverse_solve_game(self, iteration, advantage_networks):
         """Perform multiple traversals and collect data locally before adding to shared memory.
@@ -33,10 +33,7 @@ class DeepCFRActor:
                 network per player. The actor will look up the correct network
                 based on the player index encountered during traversal.
         """
-        # Store local copies of the advantage networks for quick access. If the
-        # Orchestrator accidentally passes `ObjectRef`s, dereference them
-        # defensively here to avoid runtime TypeErrors.
-        import ray  # local import to avoid circularities
+        self.unique_info_states = set()
         self.advantage_networks = [ray.get(net) if isinstance(net, ray.ObjectRef) else net
                                    for net in advantage_networks]
 
@@ -46,7 +43,7 @@ class DeepCFRActor:
             # We will traverse for *this* actor's player id (self.player).
             self._traverse_game_tree(state, iteration, self.player)
 
-        return True
+        return self.unique_info_states
     
     def policy_network_step(self, policy_network):
         """Begin policy network training."""
@@ -105,6 +102,7 @@ class DeepCFRActor:
         action = np.random.choice(chance_outcome, p=chance_proba)
         return self._traverse_game_tree(state.child(action), iteration, player)
       elif state.current_player() == player:
+        self.unique_info_states.add(tuple(state.information_state_tensor()))
         sampled_regret = collections.defaultdict(float)
         # Update the policy over the info set & actions via regret matching.
         _, strategy = self._sample_action_from_advantage(state, player)
@@ -135,6 +133,7 @@ class DeepCFRActor:
           StrategyMemory(
               np.array(state.information_state_tensor(other_player)), np.array(iteration),
               np.array(strategy)))
+        self.unique_info_states.add(tuple(state.information_state_tensor()))
         return self._traverse_game_tree(state.child(sampled_action), iteration, player)
 
     def _sample_action_from_advantage(self, state, player):

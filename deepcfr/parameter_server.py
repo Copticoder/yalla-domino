@@ -31,14 +31,7 @@ class ParameterServer():
         self._optimizer_advantage = torch.optim.Adam(
                     self._advantage_network.parameters(), lr=learning_rate)
     def put_network(self):
-        """Return a (deep-copyable) snapshot of the current advantage network.
-
-        We expose the raw `nn.Module` so that remote actors can work with a
-        regular PyTorch model.  Returning the `ObjectRef` forces callers to
-        `ray.get()` twice and, if they forget, they end up with an uncallable
-        `ObjectRef`, triggering a `TypeError` during forward passes.
-        """
-        return self._advantage_network
+        return ray.put(self._advantage_network)
     def clear_advantage_buffers(self):
         self._advantage_memories.clear()
         
