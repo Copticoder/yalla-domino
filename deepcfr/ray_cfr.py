@@ -17,27 +17,36 @@ if __name__ == "__main__":
         runtime_env={"env_vars": {"RAY_DEBUG": "1"}},
         ignore_reinit_error=True,
     )
-    game = pyspiel.load_game("python_block_dominoes")
-    # Get number of available CPUs for Ray actors
-    num_cpus = ray.cluster_resources()['CPU']
-    # Leave 1 CPU for the main process
-    num_actors = max(1, int(num_cpus) - 1)
+    # number of cpus
+    game = pyspiel.load_game("leduc_poker")
+    # Placement group reserves CPU resources exclusively for traversal actors.
+    # Learner workers are left to use any remaining cluster resources on demand.
+    placement_group = ray.util.placement_group([
+        {"CPU": 12},  # Bundle 0: Actors (traversal workers)
+    ])
+
+    # Wait until the placement group resources are ready.
+    ray.get(placement_group.ready())
+
+    # Number of traversal actors that will use the first bundle (12 CPUs).
+    num_actors = 12
 
     solver = Orchestrator(
     game,
-    policy_network_layers=(256,64,64),
-    advantage_network_layers=(256,64,64),
+    policy_network_layers=(64,64,64),
+    advantage_network_layers=(64,64,64),
     num_iterations=300,
-    num_traversals=10000,
+    num_traversals=1500,
     reinitialize_advantage_networks=True,
     learning_rate=1e-3,
-    batch_size_advantage=4096,
-    batch_size_strategy=4096,
-    memory_capacity=1e5,
-    policy_network_train_steps=20000,
-    advantage_network_train_steps=16000,
+    batch_size_advantage=256,
+    batch_size_strategy=256,
+    memory_capacity=int(1e5),
+    policy_network_train_steps=5000,
+    advantage_network_train_steps=750,
     evaluation_interval=10,
     num_actors=num_actors,
+    placement_group=placement_group,
     use_wandb=False
     )
     _, advantage_losses, policy_loss = solver.solve()

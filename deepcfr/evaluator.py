@@ -7,7 +7,7 @@ from tqdm import tqdm
 import torch.nn as nn
 
 class Evaluator(policy_module.Policy):
-    def __init__(self, game, policy_network, evaluation_interval, policy_network_train_steps, num_actors, learning_rate, run):
+    def __init__(self, game, policy_network, evaluation_interval, policy_network_train_steps, num_actors, learning_rate, run, strategy_learner):
         self.game = game
         self.policy_network = policy_network
         self.evaluation_interval = evaluation_interval
@@ -18,20 +18,28 @@ class Evaluator(policy_module.Policy):
         self._optimizer_policy = torch.optim.Adam(self._policy_network.parameters(), lr=self.learning_rate)
         self.wandb_run = run
         self._policy_sm = nn.Softmax(dim=-1)
+        self.strategy_learner = strategy_learner
     
     def evaluate(self, num_unique_info_states):
-        policy_losses = self.train_policy_network()
-        print(f"Policy loss: {policy_losses[-1]}")
+        # Train the global strategy network through the dedicated learner.
+        strategy_loss = ray.get(self.strategy_learner.learn.remote())
+
+        # Pull latest weights from the strategy learner.
+        state_dict = ray.get(self.strategy_learner.get_policy_network_state.remote())
+        self._policy_network.load_state_dict(state_dict)
+        policy_losses = [strategy_loss]
+
         player_0_returns, player_1_returns = self.evaluate_agent()
         print(f"Player 0 returns: {player_0_returns}, Player 1 returns: {player_1_returns}")
+        conv = None
         if self.game.get_type().short_name != "python_block_dominoes":
             policy = policy_module.tabular_policy_from_callable(self.game, self.action_probabilities)
             conv = exploitability.nash_conv(self.game, policy)
             print("Deep CFR - NashConv:", conv)  
-        self._policy_network.reset()
+        # Reinitialize the optimiser so future training steps start fresh.
         self._optimizer_policy = torch.optim.Adam(self._policy_network.parameters(), lr=self.learning_rate)
         if self.wandb_run:
-            self.wandb_run.log({"nash_conv": conv, "visited_unique_info_states": num_unique_info_states, "player_0_running_score": player_0_returns-player_1_returns})
+            self.wandb_run.log({"nash_conv": conv, "visited_unique_info_states": num_unique_info_states, "player_0_running_score": player_0_returns-player_1_returns, "strategy_loss": strategy_loss})
         self.save_policy_network("./networks/policy_network.pth")
         return policy_losses
     
@@ -44,7 +52,7 @@ class Evaluator(policy_module.Policy):
             remote_tasks = []
             for player in range(self.game.num_players()):
                 actors = [ray.get_actor(f"actor_{player}_{i}", namespace="deep_cfr")
-                          for i in range((self.num_actors - 2) // self.game.num_players())]
+                          for i in range(self.num_actors // self.game.num_players())]
                 remote_tasks += [actor.policy_network_step.remote(self._policy_network) for actor in actors]
 
             # Fetch results. Some actors might return `None` if their strategy
@@ -80,10 +88,17 @@ class Evaluator(policy_module.Policy):
                     chance_outcome, chance_proba = zip(*state.chance_outcomes())
                     action = np.random.choice(chance_outcome, p=chance_proba)
                 elif state.current_player() == 0:
-                    action = self.action_probabilities(state)
-                    # renormalize 
-                    action = {k: v / sum(action.values()) for k, v in action.items()}
-                    action = np.random.choice(list(action.keys()), p=list(action.values()))
+                    probs_dict = self.action_probabilities(state)
+                    total_p = sum(probs_dict.values())
+                    if total_p <= 0.0:
+                        # Shouldn't happen due to earlier guard, but fallback
+                        legal_actions = list(probs_dict.keys())
+                        action = np.random.choice(legal_actions)
+                    else:
+                        # Ensure exact normalisation
+                        probs = np.array(list(probs_dict.values()), dtype=np.float64)
+                        probs /= probs.sum()
+                        action = np.random.choice(list(probs_dict.keys()), p=probs)
                 else:
                     # take random action
                     action = np.random.choice(state.legal_actions())
@@ -107,8 +122,18 @@ class Evaluator(policy_module.Policy):
             info_state_vector = np.expand_dims(info_state_vector, axis=0)
         with torch.no_grad():
             logits = self._policy_network(torch.FloatTensor(info_state_vector))
-            probs = self._policy_sm(logits).numpy()
-        return {action: probs[0][action] for action in legal_actions}
+            probs = self._policy_sm(logits).numpy()[0]
+
+        # Filter to legal actions and renormalise to guard against rounding
+        action_probs = {action: float(probs[action]) for action in legal_actions}
+        total = sum(action_probs.values())
+        if total <= 0.0:
+            # Fall back to uniform distribution if network assigns zero mass.
+            uniform = 1.0 / len(legal_actions)
+            action_probs = {a: uniform for a in legal_actions}
+        else:
+            action_probs = {a: p / total for a, p in action_probs.items()}
+        return action_probs
 
     def save_policy_network(self, path):
         torch.save(self.policy_network.state_dict(), path)

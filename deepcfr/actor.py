@@ -6,15 +6,15 @@ import numpy as np
 from deep_cfr import ReservoirBuffer, StrategyMemory, AdvantageMemory
 @ray.remote
 class DeepCFRActor:
-    def __init__(self, game, num_traversals_per_actor, memory_capacity, batch_size_advantage, batch_size_strategy, player):
+    def __init__(self, game, num_traversals_per_actor, memory_capacity, batch_size_advantage, batch_size_strategy, player, advantage_learner, strategy_learner):
         self.game = game
         self._num_actions = game.num_distinct_actions()
         self.num_traversals_per_actor = num_traversals_per_actor
         self.num_distinct_actions = game.num_distinct_actions()
         self._embedding_size = len(game.new_initial_state().information_state_tensor(0))
         # Define advantage network, loss & memory. (One per player)
-        self._advantage_memory = ReservoirBuffer(memory_capacity)
-        self._strategy_memories = ReservoirBuffer(memory_capacity)
+        self._advantage_memory = []
+        self._strategy_memories = []
         # Define strategy network, loss & memory.
         self.memory_capacity = memory_capacity
         self.loss_advantages = nn.MSELoss(reduction="mean")
@@ -23,7 +23,9 @@ class DeepCFRActor:
         self.policy_sm = nn.Softmax(dim=-1)
         self.loss_policy = nn.MSELoss()
         self.player = player
-    def batch_traverse_solve_game(self, iteration, advantage_networks):
+        self.advantage_learner = advantage_learner
+        self.strategy_learner = strategy_learner
+    def batch_traverse_solve_game(self, iteration, advantage_network):
         """Perform multiple traversals and collect data locally before adding to shared memory.
 
         Args:
@@ -32,50 +34,21 @@ class DeepCFRActor:
                 network per player. The actor will look up the correct network
                 based on the player index encountered during traversal.
         """
-        self.unique_info_states = set()
-        self.advantage_networks = [ray.get(net) if isinstance(net, ray.ObjectRef) else net
-                                   for net in advantage_networks]
+        self.advantage_network = ray.get(advantage_network) if isinstance(advantage_network, ray.ObjectRef) else advantage_network
 
         # Perform the requested number of traversals.
         for _ in range(self.num_traversals_per_actor):
             state = self.game.new_initial_state()
             # We will traverse for *this* actor's player id (self.player).
             self._traverse_game_tree(state, iteration, self.player)
-        return self.unique_info_states
+        
+        # Send collected memories to the learners for training
+        self.advantage_learner.receive_advantage_memories.remote(self._advantage_memory)
+        self.strategy_learner.receive_strategy_memories.remote(self._strategy_memories)
+        self._advantage_memory = []
+        self._strategy_memories = []
+        return True
     
-    def policy_network_step(self, policy_network):
-        """Begin policy network training."""
-        if self.batch_size_strategy:
-            strategy_memory_size = len(self._strategy_memories)
-            if self.batch_size_strategy > strategy_memory_size:
-                return None
-            samples = self._strategy_memories.sample(self.batch_size_strategy)
-        else:
-            memory_size = len(self._strategy_memories)
-            if memory_size == 0:
-                return None
-            samples = self._strategy_memories.sample(memory_size)
-        
-        if not samples:
-            return None
-        
-        info_states = []
-        action_probs = []
-        iterations = []
-        for s in samples:
-            info_states.append(s.info_state)
-            action_probs.append(s.strategy_action_probs)
-            iterations.append([s.iteration])
-
-        policy_network.zero_grad()
-        iters = torch.FloatTensor(np.sqrt(np.array(iterations)))
-        ac_probs = torch.FloatTensor(np.array(np.squeeze(action_probs)))
-        logits = policy_network(torch.FloatTensor(np.array(info_states)))
-        outputs = self.policy_sm(logits)
-        loss_strategy = self.loss_policy(iters * outputs, iters * ac_probs)
-        loss_strategy.backward()
-        # here we need to return the gradients to be aggregated at the parameter server
-        return [p.grad.clone() for p in policy_network.parameters()], loss_strategy.detach().numpy()
     
     def _traverse_game_tree(self, state, iteration, player):
       """Performs a traversal of the game tree.
@@ -100,7 +73,6 @@ class DeepCFRActor:
         action = np.random.choice(chance_outcome, p=chance_proba)
         return self._traverse_game_tree(state.child(action), iteration, player)
       elif state.current_player() == player:
-        self.unique_info_states.add(tuple(state.information_state_tensor()))
         sampled_regret = collections.defaultdict(float)
         # Update the policy over the info set & actions via regret matching.
         _, strategy = self._sample_action_from_advantage(state, player)
@@ -116,7 +88,7 @@ class DeepCFRActor:
         sampled_regret_arr = [0] * self._num_actions
         for action in sampled_regret:
           sampled_regret_arr[action] = sampled_regret[action]
-        self._advantage_memory.add(
+        self._advantage_memory.append(
             AdvantageMemory(np.array(state.information_state_tensor()), np.array(iteration),
                             np.array(sampled_regret_arr)))
         return cfv
@@ -127,11 +99,10 @@ class DeepCFRActor:
         probs = np.array(strategy)
         probs /= probs.sum()
         sampled_action = np.random.choice(range(self._num_actions), p=probs)
-        self._strategy_memories.add(
+        self._strategy_memories.append(
           StrategyMemory(
               np.array(state.information_state_tensor(other_player)), np.array(iteration),
               np.array(strategy)))
-        self.unique_info_states.add(tuple(state.information_state_tensor()))
         return self._traverse_game_tree(state.child(sampled_action), iteration, player)
 
     def _sample_action_from_advantage(self, state, player):
@@ -141,7 +112,7 @@ class DeepCFRActor:
         
         with torch.no_grad():
             state_tensor = torch.FloatTensor(np.expand_dims(info_state, axis=0))
-            raw_advantages = self.advantage_networks[player](state_tensor)[0].numpy()
+            raw_advantages = self.advantage_network(state_tensor)[0].numpy()
         
         advantages = np.maximum(0., raw_advantages)
         cumulative_regret = np.sum(advantages[legal_actions])
@@ -155,50 +126,3 @@ class DeepCFRActor:
             matched_regrets[best_action] = 1.0
             
         return advantages, matched_regrets
-    
-    def advantage_network_step(self, advantage_network):
-        """Optimized advantage network training with pre-allocated arrays."""
-        # a = time.time()
-        # breakpoint()
-        if self.batch_size_advantage:
-            memory_size = len(self._advantage_memory)
-            if self.batch_size_advantage > memory_size:
-                return None
-            samples = self._advantage_memory.sample(self.batch_size_advantage)
-        else:
-            memory_size = len(self._advantage_memory)
-            if memory_size == 0:
-                return None
-            samples = self._advantage_memory.sample(memory_size)
-        
-        if not samples:
-            return None
-        # print("time to sample: ", time.time()-a)
-        # a = time.time()
-        # Pre-allocate numpy arrays for better performance
-        # a = time.time()
-        batch_size = len(samples)
-        info_state_size = len(samples[0].info_state)
-        advantage_size = len(samples[0].advantage)
-        
-        info_states = np.empty((batch_size, info_state_size), dtype=np.float32)
-        advantages = np.empty((batch_size, advantage_size), dtype=np.float32)
-        iterations = np.empty((batch_size, 1), dtype=np.float32)
-        
-        # Vectorized data extraction
-        for i, s in enumerate(samples):
-            info_states[i] = s.info_state
-            advantages[i] = s.advantage
-            iterations[i] = s.iteration
-        advantage_network.zero_grad()
-        advantages_tensor = torch.from_numpy(advantages)
-        iters_tensor = torch.from_numpy(np.sqrt(iterations))
-        states_tensor = torch.from_numpy(info_states)
-        # print("preparing data: ", time.time()-a)
-        # a = time.time()
-        outputs = advantage_network(states_tensor)
-        loss_advantages = self.loss_advantages(iters_tensor * outputs,
-                                                iters_tensor * advantages_tensor)
-        loss_advantages.backward()
-        # get the gradients to be aggregated at the parameter server
-        return [p.grad.clone() for p in advantage_network.parameters()], self.player, loss_advantages.detach().numpy()
