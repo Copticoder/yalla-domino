@@ -125,9 +125,6 @@ class Orchestrator:
                 traversal_tasks += [actor.batch_traverse_solve_game.remote(i, all_networks)
                                      for actor in actors]
                 
-            # Reinitialize advantage networks (optional)
-            if self.reinitialize_advantage_networks:
-                self.advantage_learners[player].reinitialize_advantage_networks.remote()
 
             # Wait for all traversals to complete and collect results using ray.wait
             outputs = []
@@ -147,6 +144,9 @@ class Orchestrator:
             # ------------------------------------------------------------------
             # After traversal data has been collected, train the networks.
             # ------------------------------------------------------------------
+            # Reinitialize advantage networks (optional)
+            if self.reinitialize_advantage_networks:
+                self.advantage_learners[player].reinitialize_advantage_networks.remote()
 
             # Train advantage networks for each player and collect losses.
             advantage_losses_iter = []
@@ -158,19 +158,19 @@ class Orchestrator:
             for p, l in enumerate(advantage_losses_values):
                 if l is not None:
                     advantage_losses[p].append(l)
-            # Train strategy / policy network
-            strategy_loss = ray.get(self.strategy_learner.learn.remote())
 
             # Logging
             for player in range(self.game.num_players()):
                 if advantage_losses[player]:
                     print(f"Advantage loss for player {player}: {advantage_losses[player][-1]}")
-            if strategy_loss is not None:
-                print(f"Strategy network loss: {strategy_loss}")
 
             if i % self.evaluation_interval == 0:
                 policy_losses = self.evaluator.evaluate(len(unique_info_states))
 
+        # Train strategy / policy network
+        strategy_loss = ray.get(self.strategy_learner.learn.remote())
+        if strategy_loss is not None:
+            print(f"Strategy network loss: {strategy_loss}")
         return self._policy_network, advantage_losses, policy_losses, unique_info_states
 
     # ------------------------------------------------------------------

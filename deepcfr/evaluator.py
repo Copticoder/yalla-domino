@@ -5,7 +5,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 import torch.nn as nn
-
+import os
 class Evaluator(policy_module.Policy):
     def __init__(self, game, policy_network, evaluation_interval, policy_network_train_steps, num_actors, learning_rate, run, strategy_learner):
         self.game = game
@@ -136,6 +136,8 @@ class Evaluator(policy_module.Policy):
         return action_probs
 
     def save_policy_network(self, path):
+        # make sure parent directory exists
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save(self.policy_network.state_dict(), path)
 
     def load_policy_network(self, path):
