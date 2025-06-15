@@ -87,7 +87,20 @@ class AdvantageLearner:
         sharing the entire model objects across Ray workers.
         """
         return self.advantage_network.state_dict()
-
+    def save_memories(self):
+        """Save the memories to a file."""
+        with open("advantage_memories.pkl", "wb") as f:
+            pickle.dump(self.advantage_memory, f)
+    def load_memories(self):
+        """Load the memories from a file."""
+        with open("advantage_memories.pkl", "rb") as f:
+            self.advantage_memory = pickle.load(f)
+    def save_network(self):
+        """Save the network to a file."""
+        torch.save(self.advantage_network.state_dict(), "advantage_network.pth")
+    def load_network(self):
+        """Load the network from a file."""
+        self.advantage_network.load_state_dict(torch.load("advantage_network.pth"))
 @ray.remote(num_gpus=0.5, num_cpus=8)
 class StrategyLearner:
     def __init__(self, game, memory_capacity, batch_size_strategy, learning_rate, policy_network_train_steps, policy_network_layers, embedding_size):
@@ -154,3 +167,17 @@ class StrategyLearner:
         self.policy_network.to(torch.device("cpu"))
         # Clone tensors onto CPU explicitly.
         return {k: v.cpu() for k, v in self.policy_network.state_dict().items()}
+    def save_memories(self):
+        """Save the memories to a file."""
+        with open("strategy_memories.pkl", "wb") as f:
+            pickle.dump(self.strategy_memories, f)
+    def load_memories(self):
+        """Load the memories from a file."""
+        with open("strategy_memories.pkl", "rb") as f:
+            self.strategy_memories = pickle.load(f)
+    def save_network(self):
+        """Save the network to a file."""
+        torch.save(self.policy_network.state_dict(), "policy_network.pth")
+    def load_network(self):
+        """Load the network from a file."""
+        self.policy_network.load_state_dict(torch.load("policy_network.pth"))
