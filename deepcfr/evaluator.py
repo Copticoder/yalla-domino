@@ -20,7 +20,7 @@ class Evaluator(policy_module.Policy):
         self._policy_sm = nn.Softmax(dim=-1)
         self.strategy_learner = strategy_learner
     
-    def evaluate(self, num_unique_info_states):
+    def evaluate(self):
         # Train the global strategy network through the dedicated learner.
         strategy_loss = ray.get(self.strategy_learner.learn.remote())
 
@@ -39,7 +39,7 @@ class Evaluator(policy_module.Policy):
         # Reinitialize the optimiser so future training steps start fresh.
         self._optimizer_policy = torch.optim.Adam(self._policy_network.parameters(), lr=self.learning_rate)
         if self.wandb_run:
-            self.wandb_run.log({"nash_conv": conv, "visited_unique_info_states": num_unique_info_states, "player_0_running_score": player_0_returns-player_1_returns, "strategy_loss": strategy_loss})
+            self.wandb_run.log({"nash_conv": conv, "visited_unique_info_states": self.strategy_learner.get_num_unique_info_sets.remote(), "player_0_running_score": player_0_returns-player_1_returns, "strategy_loss": strategy_loss})
         self.save_policy_network("./networks/policy_network.pth")
         return policy_losses
     

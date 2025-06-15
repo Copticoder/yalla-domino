@@ -112,7 +112,6 @@ class Orchestrator:
     def solve(self):
         """Solution logic for Deep CFR."""
         advantage_losses = collections.defaultdict(list)
-        unique_info_states = set()
         self._initialize_actors(self.num_actors)
         if self.training_mode:
             print("=="*10, "Training mode", "=="*10)
@@ -168,7 +167,7 @@ class Orchestrator:
                         print(f"Advantage loss for player {player}: {advantage_losses[player][-1]}")
 
                 if i % self.evaluation_interval == 0:
-                    policy_losses = self.evaluator.evaluate(len(unique_info_states))
+                    policy_losses = self.evaluator.evaluate()
                 # save the advantage memories and the policy network
                 for player in range(self.game.num_players()):
                     ray.get(self.advantage_learners[player].save_memories.remote())

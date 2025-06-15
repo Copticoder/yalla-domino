@@ -22,15 +22,17 @@ class AdvantageLearner:
                 self.game.num_distinct_actions())
         self.optimizer_advantage = torch.optim.Adam(self.advantage_network.parameters(), lr=learning_rate)
         self._advantage_network_train_steps = advantage_network_train_steps
-        self.unique_info_sets = set()
+        self.unique_info_sets = {}
         self.learning_rate = learning_rate
+    
     def receive_advantage_memories(self, advantage_memories):
         """Receive a batch (list) of AdvantageMemory objects for a player."""
         # Expecting a plain python list; if accidentally passed as ObjectRef, resolve it.
         if isinstance(advantage_memories, ray.ObjectRef):
             advantage_memories = ray.get(advantage_memories)
         self.advantage_memory.add(advantage_memories)
-        
+    
+    
     def get_advantage_network(self):
         # Always move the network to the CPU before broadcasting it. This
         # prevents Ray workers that do not have a GPU from trying to
@@ -115,12 +117,19 @@ class StrategyLearner:
         self.optimizer_strategy = torch.optim.Adam(self.policy_network.parameters(), lr=learning_rate)
         self.policy_network_train_steps = policy_network_train_steps
         self.learning_rate = learning_rate
+        self.unique_info_sets = {}
     def receive_strategy_memories(self, strategy_memories):
         """Receive a batch (list) of StrategyMemory objects."""
         if isinstance(strategy_memories, ray.ObjectRef):
             strategy_memories = ray.get(strategy_memories)
         self.strategy_memories.add(strategy_memories)
-            
+    
+    def get_num_unique_info_sets(self):
+        for s in self.strategy_memories:
+            if tuple(s.info_state) not in self.unique_info_sets:
+                self.unique_info_sets[tuple(s.info_state)] = 1
+        return len(self.unique_info_sets)
+    
     def learn(self):
         """Compute the loss over the strategy network.
 
