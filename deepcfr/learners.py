@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 from deep_cfr import MLP
-from open_spiel.python import policy
 import pickle
 from deep_cfr import ReservoirBuffer
 from tqdm import tqdm

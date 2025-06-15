@@ -3,10 +3,10 @@ import collections
 import torch
 import torch.nn as nn
 import numpy as np
-from deep_cfr import ReservoirBuffer, StrategyMemory, AdvantageMemory
-@ray.remote
+from deep_cfr import StrategyMemory, AdvantageMemory
+@ray.remote(num_cpus=1)
 class DeepCFRActor:
-    def __init__(self, game, num_traversals_per_actor, memory_capacity, batch_size_advantage, batch_size_strategy, player, advantage_learner, strategy_learner):
+    def __init__(self, game, num_traversals_per_actor, memory_capacity, batch_size_advantage, batch_size_strategy, player, advantage_learners, strategy_learner):
         self.game = game
         self._num_actions = game.num_distinct_actions()
         self.num_traversals_per_actor = num_traversals_per_actor
@@ -23,9 +23,9 @@ class DeepCFRActor:
         self.policy_sm = nn.Softmax(dim=-1)
         self.loss_policy = nn.MSELoss()
         self.player = player
-        self.advantage_learner = advantage_learner
+        self.advantage_learners = advantage_learners
         self.strategy_learner = strategy_learner
-    def batch_traverse_solve_game(self, iteration, advantage_network):
+    def batch_traverse_solve_game(self, iteration):
         """Perform multiple traversals and collect data locally before adding to shared memory.
 
         Args:
@@ -34,23 +34,23 @@ class DeepCFRActor:
                 network per player. The actor will look up the correct network
                 based on the player index encountered during traversal.
         """
-        self.advantage_network = ray.get(advantage_network) if isinstance(advantage_network, ray.ObjectRef) else advantage_network
-
+        advantage_networks = [self.advantage_learners[player].get_advantage_network.remote() for player in range(self.game.num_players())]
+        self.advantage_networks = ray.get(ray.get(advantage_networks))
         # Perform the requested number of traversals.
         for _ in range(self.num_traversals_per_actor):
             state = self.game.new_initial_state()
             # We will traverse for *this* actor's player id (self.player).
-            self._traverse_game_tree(state, iteration, self.player)
+            self._traverse_game_tree(state, iteration)
         
         # Send collected memories to the learners for training
-        self.advantage_learner.receive_advantage_memories.remote(self._advantage_memory)
+        self.advantage_learners[self.player].receive_advantage_memories.remote(self._advantage_memory)
         self.strategy_learner.receive_strategy_memories.remote(self._strategy_memories)
         self._advantage_memory = []
         self._strategy_memories = []
         return True
     
     
-    def _traverse_game_tree(self, state, iteration, player):
+    def _traverse_game_tree(self, state, iteration):
       """Performs a traversal of the game tree.
 
       Over a traversal the advantage and strategy memories are populated with
@@ -66,19 +66,19 @@ class DeepCFRActor:
       expected_payoff = collections.defaultdict(float)
       if state.is_terminal():
         # Terminal state get returns.
-        return state.returns()[player]
+        return state.returns()[self.player]
       elif state.is_chance_node():
         # If this is a chance node, sample an action
         chance_outcome, chance_proba = zip(*state.chance_outcomes())
         action = np.random.choice(chance_outcome, p=chance_proba)
-        return self._traverse_game_tree(state.child(action), iteration, player)
-      elif state.current_player() == player:
+        return self._traverse_game_tree(state.child(action), iteration)
+      elif state.current_player() == self.player:
         sampled_regret = collections.defaultdict(float)
         # Update the policy over the info set & actions via regret matching.
-        _, strategy = self._sample_action_from_advantage(state, player)
+        _, strategy = self._sample_action_from_advantage(state, self.player)
         for action in state.legal_actions():
           expected_payoff[action] = self._traverse_game_tree(
-              state.child(action), iteration, player)
+              state.child(action), iteration)
         cfv = 0
         for a_ in state.legal_actions():
           cfv += strategy[a_] * expected_payoff[a_]
@@ -103,7 +103,7 @@ class DeepCFRActor:
           StrategyMemory(
               np.array(state.information_state_tensor(other_player)), np.array(iteration),
               np.array(strategy)))
-        return self._traverse_game_tree(state.child(sampled_action), iteration, player)
+        return self._traverse_game_tree(state.child(sampled_action), iteration)
 
     def _sample_action_from_advantage(self, state, player):
         """Sample action from advantage using local network copy."""
@@ -112,7 +112,7 @@ class DeepCFRActor:
         
         with torch.no_grad():
             state_tensor = torch.FloatTensor(np.expand_dims(info_state, axis=0))
-            raw_advantages = self.advantage_network(state_tensor)[0].numpy()
+            raw_advantages = self.advantage_networks[player](state_tensor)[0].numpy()
         
         advantages = np.maximum(0., raw_advantages)
         cumulative_regret = np.sum(advantages[legal_actions])

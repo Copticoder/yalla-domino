@@ -39,7 +39,7 @@ class Evaluator(policy_module.Policy):
         # Reinitialize the optimiser so future training steps start fresh.
         self._optimizer_policy = torch.optim.Adam(self._policy_network.parameters(), lr=self.learning_rate)
         if self.wandb_run:
-            self.wandb_run.log({"nash_conv": conv, "visited_unique_info_states": self.strategy_learner.get_num_unique_info_sets.remote(), "player_0_running_score": player_0_returns-player_1_returns, "strategy_loss": strategy_loss})
+            self.wandb_run.log({"nash_conv": conv, "visited_unique_info_states": ray.get(self.strategy_learner.get_num_unique_info_sets.remote()), "player_0_running_score": player_0_returns-player_1_returns, "strategy_loss": strategy_loss})
         self.save_policy_network("./networks/policy_network.pth")
         return policy_losses
     

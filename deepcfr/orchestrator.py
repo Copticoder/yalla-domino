@@ -22,7 +22,6 @@ class Orchestrator:
                  reinitialize_advantage_networks: bool = True, 
                  evaluation_interval: int = 10,
                  num_actors: int = 0,
-                 placement_group=None,
                  use_wandb: bool = False,
                  training_mode: bool = True,
                  ):
@@ -35,7 +34,6 @@ class Orchestrator:
         self.batch_size_advantage = batch_size_advantage
         self.batch_size_strategy = batch_size_strategy
         self.num_actors = num_actors
-        self.placement_group = placement_group
         # Store training steps for policy network
         self.policy_network_train_steps = policy_network_train_steps
         self.memory_capacity = memory_capacity
@@ -94,9 +92,7 @@ class Orchestrator:
                 "name": f"actor_{player}_{{idx}}",
                 "lifetime": "detached",
                 "namespace": "deep_cfr",
-                "placement_group": self.placement_group,
-                "placement_group_bundle_index": 0,
-            } if self.placement_group else {"name": f"actor_{player}_{{idx}}", "lifetime": "detached", "namespace": "deep_cfr"}
+            } 
 
             self.actors += [DeepCFRActor.options(**{**actor_opts, "name": actor_opts["name"].format(idx=i)}).remote(
                 self.game,
@@ -105,7 +101,7 @@ class Orchestrator:
                 self.batch_size_advantage,
                 self.batch_size_strategy,
                 player,
-                self.advantage_learners[player],
+                self.advantage_learners,
                 self.strategy_learner,
             ) for i in range(num_actors // self.game.num_players())]
 
@@ -121,10 +117,7 @@ class Orchestrator:
                 for player in range(self.game.num_players()):
                     actors = [ray.get_actor(f"actor_{player}_{i}", namespace="deep_cfr")
                             for i in range(self.num_actors // self.game.num_players())]
-
-                    # Broadcast current advantage networks to all actors.
-                    all_networks = ray.get(self.advantage_learners[player].get_advantage_network.remote())
-                    traversal_tasks += [actor.batch_traverse_solve_game.remote(i, all_networks)
+                    traversal_tasks += [actor.batch_traverse_solve_game.remote(i)
                                         for actor in actors]
                     
 
@@ -138,17 +131,13 @@ class Orchestrator:
                     pbar_traverse.update(len(done))
                 pbar_traverse.close()
 
-                # NOTE: Actors currently do not return the visited information
-                # states. If detailed visitation statistics are required, the
-                # actors can be extended to return them. For now we keep count of
-                # traversals only.
 
                 # ------------------------------------------------------------------
                 # After traversal data has been collected, train the networks.
                 # ------------------------------------------------------------------
-                # Reinitialize advantage networks (optional)
                 if self.reinitialize_advantage_networks:
-                    self.advantage_learners[player].reinitialize_advantage_networks.remote()
+                    for player in range(self.game.num_players()):
+                        self.advantage_learners[player].reinitialize_advantage_networks.remote()
 
                 # Train advantage networks for each player and collect losses.
                 advantage_losses_iter = []
