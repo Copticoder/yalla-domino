@@ -8,7 +8,7 @@ import pickle
 from deep_cfr import ReservoirBuffer
 from tqdm import tqdm
 
-@ray.remote(num_cpus=2)
+@ray.remote(num_cpus=4, num_gpus=0.25)
 class AdvantageLearner:
     def __init__(self, game, memory_capacity, batch_size_advantage, batch_size_strategy, advantage_network_layers, embedding_size, learning_rate, advantage_network_train_steps):
         self.game = game
@@ -31,7 +31,13 @@ class AdvantageLearner:
             advantage_memories = ray.get(advantage_memories)
         self.advantage_memory.add(advantage_memories)
         
-    def get_advantage_network(self): 
+    def get_advantage_network(self):
+        # Always move the network to the CPU before broadcasting it. This
+        # prevents Ray workers that do not have a GPU from trying to
+        # deserialize CUDA tensors, which leads to `RuntimeError: Attempting
+        # to deserialize object on a CUDA device but torch.cuda.is_available()
+        # is False`.
+        self.advantage_network.to(torch.device("cpu"))
         return ray.put(self.advantage_network)
     
     def reinitialize_advantage_networks(self):
@@ -41,6 +47,8 @@ class AdvantageLearner:
             self.advantage_network.parameters(), lr=self.learning_rate)
     
     def learn(self, player):
+        # put the advantage network on the gpu
+        self.advantage_network.to(torch.device("cuda"))
         for _ in tqdm(range(self._advantage_network_train_steps), desc=f"Training advantage network for player {player}", leave=False):
             if self.batch_size_advantage:
                 if self.batch_size_advantage > len(self.advantage_memory):
@@ -61,14 +69,16 @@ class AdvantageLearner:
             if not info_states:
                 return None
             self.optimizer_advantage.zero_grad()
-            advantages = torch.FloatTensor(np.array(advantages))
-            iters = torch.FloatTensor(np.sqrt(np.array(iterations)))
-            outputs = self.advantage_network(torch.FloatTensor(np.array(info_states)))
+            advantages = torch.FloatTensor(np.array(advantages)).to(torch.device("cuda"))
+            iters = torch.FloatTensor(np.sqrt(np.array(iterations))).to(torch.device("cuda"))
+            outputs = self.advantage_network(torch.FloatTensor(np.array(info_states)).to(torch.device("cuda")))
             loss_advantages = self.loss_advantages(iters * outputs, iters * advantages)
             loss_advantages.backward()
             self.optimizer_advantage.step()
-        
-        return loss_advantages.detach().numpy()
+        # Move the trained network back to CPU so that subsequent
+        # serialisation does not embed CUDA tensors.
+        self.advantage_network.to(torch.device("cpu"))
+        return loss_advantages.cpu().detach().numpy()
 
     def get_advantage_network_states(self):
         """Return a list with the state_dict of each player's advantage network.
@@ -78,7 +88,7 @@ class AdvantageLearner:
         """
         return self.advantage_network.state_dict()
 
-@ray.remote(num_cpus=4)
+@ray.remote(num_gpus=0.5, num_cpus=8)
 class StrategyLearner:
     def __init__(self, game, memory_capacity, batch_size_strategy, learning_rate, policy_network_train_steps, policy_network_layers, embedding_size):
         self.game = game
@@ -104,8 +114,10 @@ class StrategyLearner:
         Returns:
         (float) The average loss obtained on this batch of transitions or `None`.
         """
+        self.policy_network.to(torch.device("cuda"))
         print(f"Training strategy network for {self.policy_network_train_steps} steps")
         for _ in tqdm(range(self.policy_network_train_steps), desc="Training strategy network"):
+            
             if self.batch_size_strategy:
                 if self.batch_size_strategy > len(self.strategy_memories):
                 ## Skip if there aren't enough samples
@@ -122,18 +134,23 @@ class StrategyLearner:
                 iterations.append([s.iteration])
 
             self.optimizer_strategy.zero_grad()
-            iters = torch.FloatTensor(np.sqrt(np.array(iterations)))
-            ac_probs = torch.FloatTensor(np.array(np.squeeze(action_probs)))
-            logits = self.policy_network(torch.FloatTensor(np.array(info_states)))
+            iters = torch.FloatTensor(np.sqrt(np.array(iterations))).to(torch.device("cuda"))
+            ac_probs = torch.FloatTensor(np.array(np.squeeze(action_probs))).to(torch.device("cuda"))
+            logits = self.policy_network(torch.FloatTensor(np.array(info_states)).to(torch.device("cuda")))
             outputs = self.policy_sm(logits)
             loss_strategy = self.loss_strategy(iters * outputs, iters * ac_probs)
             loss_strategy.backward()
             self.optimizer_strategy.step()
-
-        return loss_strategy.detach().numpy()
+        self.policy_network.to(torch.device("cpu"))
+        return loss_strategy.cpu().detach().numpy()
 
     def get_policy_network_state(self):
-        """Return the state_dict of the policy network so it can be copied
-        into local (non-Ray) models for evaluation or checkpointing.
+        """Return the state_dict of the policy network with CPU tensors.
+
+        Having all tensors on the CPU avoids deserialization errors when the
+        caller is running in an environment without CUDA.
         """
-        return self.policy_network.state_dict()
+        # Ensure weights reside on CPU first.
+        self.policy_network.to(torch.device("cpu"))
+        # Clone tensors onto CPU explicitly.
+        return {k: v.cpu() for k, v in self.policy_network.state_dict().items()}

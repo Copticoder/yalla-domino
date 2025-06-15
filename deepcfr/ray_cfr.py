@@ -5,7 +5,6 @@ import ray
 import pyspiel
 import numpy as np
 from orchestrator import Orchestrator
-
 if __name__ == "__main__":
     try:
         ray.shutdown()
@@ -18,7 +17,7 @@ if __name__ == "__main__":
         ignore_reinit_error=True,
     )
     # number of cpus
-    game = pyspiel.load_game("kuhn_poker")
+    game = pyspiel.load_game("leduc_poker")
     # Placement group reserves CPU resources exclusively for traversal actors.
     # Learner workers are left to use any remaining cluster resources on demand.
     placement_group = ray.util.placement_group([
@@ -36,13 +35,13 @@ if __name__ == "__main__":
     policy_network_layers=(256,256),
     advantage_network_layers=(256,256),
     num_iterations=300,
-    num_traversals=1500,
+    num_traversals=20000,
     reinitialize_advantage_networks=True,
     learning_rate=1e-3,
     batch_size_advantage=2048,
     batch_size_strategy=2048,
     memory_capacity=int(1e7),
-    policy_network_train_steps=5000,
+    policy_network_train_steps=1,
     advantage_network_train_steps=750,
     evaluation_interval=10,
     num_actors=num_actors,
