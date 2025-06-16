@@ -1,16 +1,20 @@
 """Draw Dominoes Implemented in Python"""
 
 import pyspiel
-import numpy as np
-from open_spiel.python.games.block_dominoes import BlockDominoesState, Action, BlockDominoesObserver, _NUM_PLAYERS, _ACTIONS_STR, _GAME_TYPE, _DECK, _ACTIONS, _MAX_GAME_LENGTH
+from open_spiel.python.games.block_dominoes import BlockDominoesState, Action, BlockDominoesObserver, _NUM_PLAYERS, _ACTIONS_STR, _GAME_TYPE, _DECK, _ACTIONS
+
+_MAX_GAME_LENGTH = 42
 
 _GAME_INFO = pyspiel.GameInfo(
     num_distinct_actions=len(_ACTIONS),
     max_chance_outcomes=len(_DECK),
+    # maximum utility is the sum of all tiles in the deck
+    min_utility=-sum([tile[0] + tile[1] for tile in _DECK]),
+    max_utility=sum([tile[0] + tile[1] for tile in _DECK]),
     # first player hand: (6,6) (6,5) (5,5) (6,4) (4,5) (6,3) (4,4)
     # second player hand is empty. can be reduced.
     num_players=_NUM_PLAYERS,
-    # deal: 14 chance nodes + play: 14 player nodes
+    # deal: 14 chance nodes + play: players can draw the remaining tiles from the deck, so 14 + 14 in the deck + 14 chance = 42 
     max_game_length=_MAX_GAME_LENGTH,
     utility_sum=0.0,
 )
@@ -31,6 +35,7 @@ _GAME_TYPE = pyspiel.GameType(
     provides_observation_tensor=True,
     provides_factored_observation_string=True,
 )
+
 class DrawDominoesGame(pyspiel.Game):
   """A Python version of Block Dominoes."""
 
@@ -81,19 +86,17 @@ class DrawDominoesState(BlockDominoesState):
     actions_idx = [_ACTIONS_STR.index(str(action)) for action in actions]
     actions_idx.sort()
     return actions_idx
-
-
-
+  
 pyspiel.register_game(_GAME_TYPE, DrawDominoesGame)
-# test the new Draw Dominoes State
 
-game = pyspiel.load_game('python_draw_dominoes')
-state = game.new_initial_state()
-# unique actions 
-print(game.information_state_tensor_shape())	
-while not state.is_terminal():
-    legal_actions = state.legal_actions()
-    if legal_actions:
-        state.apply_action(np.random.choice(legal_actions))
 
-print(state.history())
+# game = pyspiel.load_game('python_draw_dominoes')
+# state = game.new_initial_state()
+# # unique actions 
+# print(game.information_state_tensor_shape())	
+# while not state.is_terminal():
+#     legal_actions = state.legal_actions()
+#     if legal_actions:
+#         state.apply_action(np.random.choice(legal_actions))
+
+# print(state.history())

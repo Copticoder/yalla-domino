@@ -168,12 +168,12 @@ class Orchestrator:
             strategy_loss = ray.get(self.strategy_learner.learn.remote())
             if strategy_loss is not None:
                 print(f"Strategy network loss: {strategy_loss}")
-            return self._policy_network, advantage_losses, policy_losses, unique_info_states
+            return self._policy_network, advantage_losses, policy_losses
         else:
             print("=="*10, "Evaluation mode", "=="*10)
             # load latest policy network
             self.strategy_learner.load_network.remote()
-            self.evaluator.evaluate(len(unique_info_states))
+            self.evaluator.evaluate()
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
