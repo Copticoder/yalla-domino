@@ -1,10 +1,36 @@
 """Draw Dominoes Implemented in Python"""
 
 import pyspiel
+import numpy as np
+from open_spiel.python.games.block_dominoes import BlockDominoesState, Action, BlockDominoesObserver, _NUM_PLAYERS, _ACTIONS_STR, _GAME_TYPE, _DECK, _ACTIONS, _MAX_GAME_LENGTH
 
-from open_spiel.python.games.block_dominoes import BlockDominoesState, Action, BlockDominoesObserver, _GAME_INFO, _NUM_PLAYERS, _ACTIONS_STR
+_GAME_INFO = pyspiel.GameInfo(
+    num_distinct_actions=len(_ACTIONS),
+    max_chance_outcomes=len(_DECK),
+    # first player hand: (6,6) (6,5) (5,5) (6,4) (4,5) (6,3) (4,4)
+    # second player hand is empty. can be reduced.
+    num_players=_NUM_PLAYERS,
+    # deal: 14 chance nodes + play: 14 player nodes
+    max_game_length=_MAX_GAME_LENGTH,
+    utility_sum=0.0,
+)
 
-
+_GAME_TYPE = pyspiel.GameType(
+    short_name="python_draw_dominoes",
+    long_name="python_draw_dominoes",
+    dynamics=pyspiel.GameType.Dynamics.SEQUENTIAL,
+    chance_mode=pyspiel.GameType.ChanceMode.EXPLICIT_STOCHASTIC,
+    information=pyspiel.GameType.Information.IMPERFECT_INFORMATION,
+    utility=pyspiel.GameType.Utility.ZERO_SUM,
+    reward_model=pyspiel.GameType.RewardModel.TERMINAL,
+    max_num_players=_NUM_PLAYERS,
+    min_num_players=_NUM_PLAYERS,
+    provides_information_state_string=True,
+    provides_information_state_tensor=True,
+    provides_observation_string=True,
+    provides_observation_tensor=True,
+    provides_factored_observation_string=True,
+)
 class DrawDominoesGame(pyspiel.Game):
   """A Python version of Block Dominoes."""
 
@@ -56,29 +82,18 @@ class DrawDominoesState(BlockDominoesState):
     actions_idx.sort()
     return actions_idx
 
-_GAME_TYPE = pyspiel.GameType(
-    short_name="python_draw_dominoes",
-    long_name="python_draw_dominoes",
-    dynamics=pyspiel.GameType.Dynamics.SEQUENTIAL,
-    chance_mode=pyspiel.GameType.ChanceMode.EXPLICIT_STOCHASTIC,
-    information=pyspiel.GameType.Information.IMPERFECT_INFORMATION,
-    utility=pyspiel.GameType.Utility.ZERO_SUM,
-    reward_model=pyspiel.GameType.RewardModel.TERMINAL,
-    max_num_players=_NUM_PLAYERS,
-    min_num_players=_NUM_PLAYERS,
-    provides_information_state_string=True,
-    provides_information_state_tensor=True,
-    provides_observation_string=True,
-    provides_observation_tensor=True,
-    provides_factored_observation_string=True,
-)
+
 
 pyspiel.register_game(_GAME_TYPE, DrawDominoesGame)
 # test the new Draw Dominoes State
 
 game = pyspiel.load_game('python_draw_dominoes')
 state = game.new_initial_state()
-
+# unique actions 
+print(game.information_state_tensor_shape())	
 while not state.is_terminal():
-    state.apply_action(state.legal_actions()[0])
-    print(state)
+    legal_actions = state.legal_actions()
+    if legal_actions:
+        state.apply_action(np.random.choice(legal_actions))
+
+print(state.history())
