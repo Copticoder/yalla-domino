@@ -32,7 +32,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from tqdm import tqdm
-
+import time
 from open_spiel.python import policy
 import pyspiel
 
@@ -414,8 +414,8 @@ class DeepCFRSolver(policy.Policy):
     with torch.no_grad():
       state_tensor = torch.FloatTensor(np.expand_dims(info_state, axis=0))
       raw_advantages = self._advantage_networks[player](state_tensor)[0].numpy()
-    advantages = [max(0., advantage) for advantage in raw_advantages]
-    cumulative_regret = np.sum([advantages[action] for action in legal_actions])
+    advantages = np.maximum(0., raw_advantages)
+    cumulative_regret = advantages[legal_actions].sum()
     matched_regrets = np.array([0.] * self._num_actions)
     if cumulative_regret > 0.:
       for action in legal_actions:
