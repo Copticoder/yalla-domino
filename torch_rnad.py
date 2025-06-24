@@ -2,7 +2,7 @@ from typing import Sequence, Tuple
 import numpy as np
 import torch
 import enum
-from open_spiel.python import policy as policy_lib
+from open_spiel.python import policy
 import torch.nn as nn
 import torch.nn.functional as F
 import copy
@@ -34,18 +34,18 @@ class ActorCriticNetwork(nn.Module):
       self.actor_head = nn.Linear(prev_dim, num_actions)
       # Define the critic head
       self.critic_head = nn.Linear(prev_dim, 1)
-  def forward(self, env_step):
+  def forward(self, info_state_tensor, legal_actions_tensor):
       # Convert numpy inputs from EnvStep to torch tensors
-      obs_tensor = env_step["obs"]
+      obs_tensor = info_state_tensor.squeeze()
       # legal_actions are used as masks, boolean is appropriate.
-      legal_actions_tensor = env_step["legal"]
+      legal_actions_tensor = legal_actions_tensor.squeeze()
 
       # Pass through the shared MLP
       x = self.shared_mlp(obs_tensor)
       # Actor: output the policy logits
-      logits = self.actor_head(x)
+      logits = self.actor_head(x).squeeze()
       # Critic: output the state value
-      value = self.critic_head(x)
+      value = self.critic_head(x).squeeze()
 
       # Use converted tensors for policy functions
       pi = _legal_policy(logits, legal_actions_tensor)
@@ -138,10 +138,11 @@ class EntropySchedule:
     iteration_start = (last_start * beyond + start * (1 - beyond))
     iteration_size = (last_size * beyond + size * (1 - beyond))
 
+    # Ensure the result is a Python bool (not a numpy.bool_) by calling `.item()`.
     update_target_net = np.logical_and(
         learner_step > 0,
-        np.sum(learner_step == iteration_start + iteration_size - 1),
-    )
+        learner_step == (iteration_start + iteration_size - 1),
+    ).item()
     alpha = np.minimum(
         (2.0 * (learner_step - iteration_start)) / iteration_size, 1.0)
 
@@ -196,7 +197,7 @@ class FineTuning:
     # flatten policy to (B*T,A)
     mu = self._discretize(policy.view(-1,policy.shape[-1]))
     # reshape it back to the original shape (B,T,A)
-    policy = policy.view(policy.shape[0],policy.shape[1],1,-1)
+    policy = mu.view(policy.shape[0],policy.shape[1],-1)
     return policy
 
   def _threshold(self, policy: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -358,10 +359,88 @@ def _policy_ratio(pi: torch.Tensor, mu: torch.Tensor, actions_oh: torch.Tensor,
   pi_actions_prob = _select_action_prob(pi)
   mu_actions_prob = _select_action_prob(mu)
   return pi_actions_prob / mu_actions_prob 
+def get_loss_nerd(logit_list: Sequence[torch.Tensor],
+                  policy_list: Sequence[torch.Tensor],
+                  q_vr_list: Sequence[torch.Tensor],
+                  valid: torch.Tensor,
+                  player_ids: torch.Tensor,  # Single tensor, not list
+                  legal_actions: torch.Tensor,
+                  importance_sampling_correction: Sequence[torch.Tensor],
+                  clip: float = 100,
+                  threshold: float = 2) -> torch.Tensor:
+  """Define the nerd loss."""
+  assert isinstance(importance_sampling_correction, list)
+  loss_pi_list = []
+  num_valid_actions = torch.sum(legal_actions, dim=-1, keepdim=True)
+  for k, (logit_pi, pi, q_vr, is_c) in enumerate(
+      zip(logit_list, policy_list, q_vr_list, importance_sampling_correction)):
+    assert logit_pi.shape[0] == q_vr.shape[0]
+    # loss policy
+    adv_pi = q_vr - torch.sum(pi.squeeze() * q_vr, dim=-1, keepdim=True)
+    adv_pi = is_c * adv_pi  # importance sampling correction
+    adv_pi = torch.clamp(adv_pi, min=-clip, max=clip)
+    adv_pi = adv_pi.detach()
 
+    valid_logit_sum = torch.sum(logit_pi.squeeze() * legal_actions, dim=-1, keepdim=True)
+    mean_logit = valid_logit_sum / num_valid_actions
+
+    # Subtract only the mean of the valid logits
+    logits = logit_pi.squeeze() - mean_logit
+
+    threshold_center = torch.zeros_like(logits)
+
+    nerd_loss = torch.sum(
+        legal_actions *
+        apply_force_with_threshold(logits, adv_pi, threshold, threshold_center),
+        dim=-1)
+    nerd_loss = -renormalize(nerd_loss, valid * (player_ids == k))
+    loss_pi_list.append(nerd_loss)
+  return torch.sum(torch.stack(loss_pi_list))
+
+def apply_force_with_threshold(decision_outputs: torch.Tensor, force: torch.Tensor,
+                               threshold: float,
+                               threshold_center: torch.Tensor) -> torch.Tensor:
+  """Apply the force with below a given threshold."""
+  assert decision_outputs.shape == force.shape == threshold_center.shape
+  can_decrease = decision_outputs - threshold_center > -threshold
+  can_increase = decision_outputs - threshold_center < threshold
+  force_negative = torch.minimum(force, torch.zeros_like(force))
+  force_positive = torch.maximum(force, torch.zeros_like(force))
+  clipped_force = can_decrease * force_negative + can_increase * force_positive
+  return decision_outputs * clipped_force.detach()
+
+
+def renormalize(loss: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+  """The `normalization` is the number of steps over which loss is computed."""
+  assert loss.shape == mask.shape
+  loss = torch.sum(loss * mask)
+  normalization = torch.sum(mask)
+  return loss / (normalization + (normalization == 0.0))
+
+def get_loss_v(v_list: Sequence[torch.Tensor],
+               v_target_list: Sequence[torch.Tensor],
+               mask_list: Sequence[torch.Tensor]) -> torch.Tensor:
+  """Define the loss function for the critic."""
+  assert all(v.shape == v_target.shape for v, v_target in zip(v_list, v_target_list))
+  # v_list and v_target_list come with a degenerate trailing dimension,
+  # which mask_list tensors do not have.
+  assert mask_list[0].shape == v_list[0].shape 
+  loss_v_list = []
+  for (v_n, v_target, mask) in zip(v_list, v_target_list, mask_list):
+    assert v_n.shape[0] == v_target.shape[0]
+
+    loss_v = mask * (v_n - v_target.detach())**2  # Add dim for broadcasting
+    normalization = torch.sum(mask)
+    loss_v = torch.sum(loss_v) / (normalization + (normalization == 0.0))
+
+    loss_v_list.append(loss_v)
+  return torch.sum(torch.stack(loss_v_list))
+  
 def _legal_policy(logits: torch.Tensor, legal_actions: torch.Tensor) -> torch.Tensor:
   """A soft-max policy that respects legal_actions."""
   assert logits.shape == legal_actions.shape
+  # legal_actions is a boolean tensor
+  legal_actions = legal_actions.bool()
   # Fiddle a bit to make sure we don't generate NaNs or Inf in the middle.
   l_min = logits.min(axis=-1, keepdims=True)
   logits = torch.where(legal_actions, logits, l_min.values)
@@ -415,7 +494,7 @@ def v_trace(
     player_id: torch.Tensor,
     acting_policy: torch.Tensor,
     merged_policy: torch.Tensor,
-    merged_log_policy: torch.Tensor,    
+    merged_log_policy: torch.Tensor,
     player_others: torch.Tensor,
     actions_oh: torch.Tensor,
     reward: torch.Tensor,
@@ -428,101 +507,83 @@ def v_trace(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
   """Custom VTrace for trajectories with a mix of different player steps."""
   gamma = 1.0
-  
+
   has_played = player_k_has_played(valid, player_id, player)
-  
+
   policy_ratio = _policy_ratio(merged_policy, acting_policy, actions_oh, valid)
   inv_mu = _policy_ratio(
       torch.ones_like(merged_policy), acting_policy, actions_oh, valid)
 
-
-  # entropy bonus
   eta_reg_entropy = (-eta *
                      torch.sum(merged_policy * merged_log_policy, axis=-1) *
                      torch.squeeze(player_others, axis=-1))
   eta_log_policy = -eta * merged_log_policy * player_others
 
-  @dataclasses.dataclass(frozen=True)
-  class LoopVTraceCarry:
-    """The carry of the v-trace scan loop."""
-    reward: torch.Tensor
-    # The cumulated reward until the end of the episode. Uncorrected (v-trace).
-    # Gamma discounted and includes eta_reg_entropy.
-    reward_uncorrected: torch.Tensor
-    next_value: torch.Tensor
-    next_v_target: torch.Tensor
-    importance_sampling: torch.Tensor
+  def v_trace_single_sequence(v_seq, has_played_seq, reward_seq, inv_mu_seq, eta_reg_entropy_seq, eta_log_policy_seq, actions_oh_seq, policy_ratio_seq):
+    """Process a single sequence (one batch element) for v-trace."""
+    T = len(v_seq) - 1  # v has shape [T+1], others have shape [T]
+    
+    # Initialize carry state for the backward sweep
+    reward_corrected = torch.zeros_like(reward_seq[-1])
+    next_value = torch.zeros_like(v_seq[-1]).squeeze()  # Remove extra dims
+    next_v_target = torch.zeros_like(v_seq[-1]).squeeze()
+    importance_sampling = torch.ones_like(policy_ratio_seq[-1])  # scalar
+    
+    # Pre-allocate output tensors
+    v_targets = torch.zeros_like(v_seq).squeeze()  # [T]
+    learning_outputs = torch.zeros_like(actions_oh_seq)  # [T, A]
+    
+    for t in reversed(range(T)):
+      # Compute importance sampling ratios
+      rho_t = torch.minimum(torch.tensor(rho), policy_ratio_seq[t] * importance_sampling)
+      c_t = torch.minimum(torch.tensor(c), policy_ratio_seq[t] * importance_sampling)
+      
+      # Use torch.where instead of if statements for vmap compatibility
+      has_played_t = has_played_seq[t]
+      
+      # Compute values for both cases (player's turn and opponent's turn)
+      # Player's turn computations
+      bootstrap_v_target_t = rho_t * (reward_seq[t] + eta_reg_entropy_seq[t]*reward_corrected + gamma * next_value - v_seq[t].squeeze())
+      v_target_player = v_seq[t].squeeze() + bootstrap_v_target_t + lambda_ * c_t * gamma * (next_v_target - next_value)
+      
+      learning_output_player = (eta_log_policy_seq[t] + 
+                               actions_oh_seq[t] * inv_mu_seq[t].unsqueeze(-1) * 
+                               (reward_seq[t] + eta_reg_entropy_seq[t] + gamma * importance_sampling * (reward_corrected + next_v_target) - v_seq[t].squeeze()))
+      
+      reward_corrected_player = torch.zeros_like(reward_seq[t])
+      importance_sampling_player = torch.ones_like(importance_sampling)
+      next_value_player = v_target_player
+      next_v_target_player = v_target_player
+      
+      # Opponent's turn computations  
+      v_target_opponent = next_v_target
+      learning_output_opponent = torch.zeros_like(actions_oh_seq[t])
+      reward_corrected_opponent = eta_reg_entropy_seq[t] + c_t * reward_corrected
+      importance_sampling_opponent = c_t * importance_sampling
+      next_value_opponent = gamma * v_seq[t+1].squeeze()
+      next_v_target_opponent = gamma * v_target_opponent
+      
+      # Select based on has_played using torch.where
+      v_target = torch.where(has_played_t, v_target_player, v_target_opponent)
+      learning_output = torch.where(has_played_t.unsqueeze(-1), learning_output_player, learning_output_opponent)
+      reward_corrected = torch.where(has_played_t, reward_corrected_player, reward_corrected_opponent)
+      importance_sampling = torch.where(has_played_t, importance_sampling_player, importance_sampling_opponent)
+      next_value = torch.where(has_played_t, next_value_player, next_value_opponent)
+      next_v_target = torch.where(has_played_t, next_v_target_player, next_v_target_opponent)
+      
+      # Store results
+      v_targets[t] = v_target
+      learning_outputs[t] = learning_output
+    
+    return v_targets, learning_outputs
+  
+  # Apply vmap over the batch dimension
+  v_targets, learning_outputs = torch.vmap(v_trace_single_sequence, in_dims=(0, 0, 0, 0, 0, 0, 0, 0))(
+      v, has_played, reward, inv_mu, eta_reg_entropy, eta_log_policy, actions_oh, policy_ratio
+  )
+  
+  return v_targets, has_played, learning_outputs
 
-  init_state_v_trace = LoopVTraceCarry(
-      reward=torch.zeros_like(reward[-1]),
-      reward_uncorrected=torch.zeros_like(reward[-1]),
-      next_value=torch.zeros_like(v[-1]),
-      next_v_target=torch.zeros_like(v[-1]),
-      importance_sampling=torch.ones_like(policy_ratio[-1]))
-
-  def _loop_v_trace(carry: LoopVTraceCarry, x) -> Tuple[LoopVTraceCarry, Any]:
-    (cs, player_id, v, reward, eta_reg_entropy, valid, inv_mu, actions_oh,
-     eta_log_policy) = x
-
-    reward_uncorrected = (
-        reward + gamma * carry.reward_uncorrected + eta_reg_entropy)
-    discounted_reward = reward + gamma * carry.reward
-
-    # V-target:
-    our_v_target = (
-        v + jnp.expand_dims(
-            jnp.minimum(rho, cs * carry.importance_sampling), axis=-1) *
-        (jnp.expand_dims(reward_uncorrected, axis=-1) +
-         gamma * carry.next_value - v) + lambda_ * jnp.expand_dims(
-             jnp.minimum(c, cs * carry.importance_sampling), axis=-1) * gamma *
-        (carry.next_v_target - carry.next_value))
-
-    opp_v_target = jnp.zeros_like(our_v_target)
-    reset_v_target = jnp.zeros_like(our_v_target)
-
-    # Learning output:
-    our_learning_output = (
-        v +  # value
-        eta_log_policy +  # regularisation
-        actions_oh * jnp.expand_dims(inv_mu, axis=-1) *
-        (jnp.expand_dims(discounted_reward, axis=-1) + gamma * jnp.expand_dims(
-            carry.importance_sampling, axis=-1) * carry.next_v_target - v))
-
-    opp_learning_output = jnp.zeros_like(our_learning_output)
-    reset_learning_output = jnp.zeros_like(our_learning_output)
-
-    # State carry:
-    our_carry = LoopVTraceCarry(
-        reward=jnp.zeros_like(carry.reward),
-        next_value=v,
-        next_v_target=our_v_target,
-        reward_uncorrected=jnp.zeros_like(carry.reward_uncorrected),
-        importance_sampling=jnp.ones_like(carry.importance_sampling))
-    opp_carry = LoopVTraceCarry(
-        reward=eta_reg_entropy + cs * discounted_reward,
-        reward_uncorrected=reward_uncorrected,
-        next_value=gamma * carry.next_value,
-        next_v_target=gamma * carry.next_v_target,
-        importance_sampling=cs * carry.importance_sampling)
-    reset_carry = init_state_v_trace
-
-    # Invalid turn: init_state_v_trace and (zero target, learning_output)
-    # pyformat: disable
-    return _where(valid,  # pytype: disable=bad-return-type  # numpy-scalars
-                  _where((player_id == player),
-                         (our_carry, (our_v_target, our_learning_output)),
-                         (opp_carry, (opp_v_target, opp_learning_output))),
-                  (reset_carry, (reset_v_target, reset_learning_output)))
-    # pyformat: enable
-
-  _, (v_target, learning_output) = lax.scan(
-      f=_loop_v_trace,
-      init=init_state_v_trace,
-      xs=(policy_ratio, player_id, v, reward, eta_reg_entropy, valid, inv_mu,
-          actions_oh, eta_log_policy),
-      reverse=True)
-
-  return v_target, has_played, learning_output
 def player_others(player_ids: torch.Tensor, valid: torch.Tensor,
                    player: int) -> torch.Tensor:
   """A vector of 1 for the current player and -1 for others.
@@ -541,7 +602,7 @@ def player_others(player_ids: torch.Tensor, valid: torch.Tensor,
   res = 2 * current_player_tensor - 1
   res = res * valid
   return res.unsqueeze(-1)
-class RNaDSolver(policy_lib.Policy):
+class RNaDSolver(policy.Policy):
   def __init__(self, config: RNaDConfig):
     self.config = config
     # Learner and actor step counters.
@@ -578,14 +639,11 @@ class RNaDSolver(policy_lib.Policy):
         repeats=self.config.entropy_schedule_repeats)
     
     # #####
-    # self._loss_and_grad = jax.value_and_grad(self.loss, has_aux=False)
-    # #####
     # create the networks for the prev_policy, target_policy. at the beginning, they are the same
     self.params_target = copy.deepcopy(self.params)
     self.params_prev = copy.deepcopy(self.params)
     self.params_prev_ = copy.deepcopy(self.params)
     self.optimizer = Adam(self.params.parameters(), lr=self.config.learning_rate, betas=(self.config.adam.b1, self.config.adam.b2), eps=self.config.adam.eps)
-    self.optimizer_target = SGD(self.params_target.parameters(), lr=self.config.target_network_avg)
     
   # def _network_apply_and_post_process(
   #     self, params: Params, env_step: EnvStep) -> chex.Array:
@@ -595,7 +653,7 @@ class RNaDSolver(policy_lib.Policy):
   
   def actor_step(self, env_step_td: TensorDict):
     with torch.no_grad():
-      pi, _, _, _ = self.params(env_step_td)
+      pi, _, _, _ = self.params(env_step_td["obs"], env_step_td["legal"])
       pi = pi / torch.sum(pi, dim=-1, keepdim=True)
       # remove the timestep
       pi = pi.squeeze(1)
@@ -612,26 +670,52 @@ class RNaDSolver(policy_lib.Policy):
     """One step of the algorithm, that plays the game and improves params."""
     timesteps = self.collect_batch_trajectory()
     alpha, update_target_net = self._entropy_schedule(self.learner_steps)
-    (self.optimizer, self.optimizer_target), logs = self.update_parameters(
-        self.optimizer, self.optimizer_target, timesteps, alpha,
-        self.learner_steps, update_target_net)
+    logs = self.update_parameters(timesteps, alpha, self.learner_steps, update_target_net)
     self.learner_steps += 1
     logs.update({
         "actor_steps": self.actor_steps,
         "learner_steps": self.learner_steps,
     })
+    # PRINTING
+    print("--------------------------------")
+    print("Learner steps: ", self.learner_steps)
+    print("Actor steps: ", self.actor_steps)
+    print("Loss: ", logs["loss"].item())
+    print("--------------------------------")
     return logs
+  
+  
+  def action_probabilities(self, state):
+    """Computes action probabilities for the current player in state.
+
+    Args:
+      state: (pyspiel.State) The state to compute probabilities for.
+
+    Returns:
+      (dict) action probabilities for a single batch.
+    """
+    cur_player = state.current_player()
+    legal_actions = state.legal_actions_mask(cur_player)
+    env_step = TensorDict()
+    obs = torch.tensor(state.information_state_tensor(), dtype=torch.float32)
+    env_step["obs"] = obs.reshape(1,*obs.size())
+    legal = torch.tensor(legal_actions, dtype=bool)
+    env_step["legal"] = legal.reshape(1,*legal.size())
+    with torch.no_grad():
+      pi, _, _, _ = self.params_target(env_step["obs"], env_step["legal"])
+      pi = pi.numpy()
+    return {action: pi[action] for action in legal_actions}
 
   def loss(self, ts: TensorDict, alpha: float,
            learner_steps: int) -> float:
     # pass every timestep to the network using torch vmap
     ts["env_step_td"].batch_size = (self.config.batch_size,self.config.trajectory_max)
-    pi, v, log_pi, logit = torch.vmap(self.params, in_dims=1, out_dims=1)(ts["env_step_td"])
+    pi, v, log_pi, logit = torch.vmap(self.params, in_dims=(1,1), out_dims=1)(ts["env_step_td"]["obs"], ts["env_step_td"]["legal"])
     policy_pprocessed = self.config.finetune(pi, ts["env_step_td"]["legal"], learner_steps)
 
-    _, v_target, _, _ = torch.vmap(self.params_target, in_dims=1, out_dims=1)(ts["env_step_td"])
-    _, _, log_pi_prev, _ = torch.vmap(self.params_prev, in_dims=1, out_dims=1)(ts["env_step_td"])
-    _, _, log_pi_prev_, _ = torch.vmap(self.params_prev_, in_dims=1, out_dims=1)(ts["env_step_td"])
+    _, v_target, _, _ = torch.vmap(self.params_target, in_dims=1, out_dims=1)(ts["env_step_td"]["obs"], ts["env_step_td"]["legal"])
+    _, _, log_pi_prev, _ = torch.vmap(self.params_prev, in_dims=1, out_dims=1)(ts["env_step_td"]["obs"], ts["env_step_td"]["legal"])
+    _, _, log_pi_prev_, _ = torch.vmap(self.params_prev_, in_dims=1, out_dims=1)(ts["env_step_td"]["obs"], ts["env_step_td"]["legal"])
     # This line creates the reward transform log(pi(a|x)/pi_reg(a|x)).
     # For the stability reasons, reward changes smoothly between iterations.
     # The mixing between old and new reward transform is a convex combination
@@ -659,53 +743,63 @@ class RNaDSolver(policy_lib.Policy):
       v_target_list.append(v_target_)
       has_played_list.append(has_played)
       v_trace_policy_target_list.append(policy_target_)
-    loss_v = get_loss_v([v] * self._game.num_players(), v_target_list,
+    loss_v = get_loss_v([v.squeeze()] * self._game.num_players(), v_target_list,
                         has_played_list)
 
-    is_vector = jnp.expand_dims(jnp.ones_like(ts.env.valid), axis=-1)
+    is_vector = torch.ones((self.config.batch_size, self.config.trajectory_max, self._game.num_distinct_actions()))
     importance_sampling_correction = [is_vector] * self._game.num_players()
     # Uses v-trace to define q-values for Nerd
     loss_nerd = get_loss_nerd(
         [logit] * self._game.num_players(), [pi] * self._game.num_players(),
         v_trace_policy_target_list,
-        ts.env.valid,
-        ts.env.player_id,
-        ts.env.legal,
+        ts["env_step_td"]["valid"].squeeze(),
+        ts["env_step_td"]["player_id"].squeeze(),
+        ts["env_step_td"]["legal"].squeeze(),
         importance_sampling_correction,
         clip=self.config.nerd.clip,
         threshold=self.config.nerd.beta)
-    return loss_v + loss_nerd  # pytype: disable=bad-return-type  # numpy-scalars
+    total_loss = loss_v + loss_nerd
+    return total_loss
+  
   
   def update_parameters(
       self,
-      optimizer: torch.optim.Adam,
-      optimizer_target: torch.optim.SGD,
       timestep: TensorDict,
       alpha: float,
       learner_steps: int,
       update_target_net: bool):
+    """Update parameters using computed gradients and target network updates."""
+    
+    # Zero gradients from previous iteration
+    self.optimizer.zero_grad()
+    
+    # Compute loss and perform backward pass
+    loss_val = self.loss(timestep, alpha, learner_steps)
+    
+    # Clip gradients if specified
+    if self.config.clip_gradient > 0:
+        torch.nn.utils.clip_grad_norm_(self.params.parameters(), self.config.clip_gradient)
+    
+    # Update main parameters using optimizer (equivalent to optimizer(params, grad) in JAX)
+    self.optimizer.step()
+    
+    # Update target network towards main network (exponential moving average)
+    with torch.no_grad():
+        for target_param, main_param in zip(self.params_target.parameters(), self.params.parameters()):
+            target_param.data.mul_(1 - self.config.target_network_avg).add_(
+                main_param.data, alpha=self.config.target_network_avg
+            )
+    
+    # Conditionally roll forward the previous parameters
+    if update_target_net:
+        # Move params_target -> params_prev and params_prev -> params_prev_
+        self.params_prev_.load_state_dict(self.params_prev.state_dict())
+        self.params_prev.load_state_dict(self.params_target.state_dict())
 
-    loss_val, grad = self.loss( timestep, alpha,
-                                         learner_steps)
-    # # Update `params`` using the computed gradient.
-    # params = optimizer(params, grad)
-    # # Update `params_target` towards `params`.
-    # params_target = optimizer_target(
-    #     params_target, tree.tree_map(lambda a, b: a - b, params_target, params))
-
-    # # Rolls forward the prev and prev_ params if update_target_net is 1.
-    # # pyformat: disable
-    # params_prev, params_prev_ = jax.lax.cond(
-    #     update_target_net,
-    #     lambda: (params_target, params_prev),
-    #     lambda: (params_prev, params_prev_))
-    # # pyformat: enable
-
-    # logs = {
-    #     "loss": loss_val,
-    # }
-    # return (params, params_target, params_prev, params_prev_, optimizer,
-            # optimizer_target), logs
+    logs = {
+        "loss": loss_val,
+    }
+    return logs
   
   def _batch_of_states_as_env_step(self,
                                    states: Sequence[pyspiel.State]) -> TensorDict:
@@ -713,11 +807,11 @@ class RNaDSolver(policy_lib.Policy):
     with torch.no_grad():
       for i, state in enumerate(states):
         obs, legal, player_id, valid, rewards = self._state_as_env_step(state)
-        obs = obs.reshape(1,1,*obs.size())
-        legal = legal.reshape(1,1,*legal.size())
-        player_id = player_id.reshape(1,1,1)
-        valid = valid.reshape(1,1,1)
-        rewards = rewards.reshape(1,1,*rewards.size())
+        obs = obs.reshape(1,*obs.size())
+        legal = legal.reshape(1,*legal.size())
+        player_id = player_id.reshape(1,1)
+        valid = valid.reshape(1,1)
+        rewards = rewards.reshape(1,*rewards.size())
         if "obs" not in env_step_td:
           env_step_td["obs"] = obs
           env_step_td["legal"] = legal
@@ -742,6 +836,7 @@ class RNaDSolver(policy_lib.Policy):
         state.apply_action(action)
         self._play_chance(state)
     return states
+  
   def collect_batch_trajectory(self) -> TensorDict:
     states = [
         self._play_chance(self._game.new_initial_state())
@@ -800,6 +895,10 @@ class RNaDSolver(policy_lib.Policy):
       state.apply_action(action)
     return state
 
-
+from open_spiel.python.algorithms import exploitability
 solver = RNaDSolver(RNaDConfig(game_name="leduc_poker"))
-solver.step()
+for _ in range(1000):
+  solver.step()
+  p = policy.tabular_policy_from_callable(solver._game, solver.action_probabilities)
+  conv = exploitability.nash_conv(solver._game, p)
+  print("Deep CFR - NashConv:", conv)  
