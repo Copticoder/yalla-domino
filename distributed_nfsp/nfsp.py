@@ -62,7 +62,7 @@ class MLP(nn.Module):
   def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore
     return self._model(x)
 
-@ray.remote(num_cpus=1)
+@ray.remote(num_cpus=1, namespace="nfsp")
 class NFSP(rl_agent.AbstractAgent):
   """NFSP Agent implementation in PyTorch."""
 
@@ -70,7 +70,6 @@ class NFSP(rl_agent.AbstractAgent):
       self,
       game,
       num_players: int,
-      state_representation_size: int,
       num_actions: int,
       reservoir_buffer_capacity: int,
       anticipatory_param: float,
@@ -81,7 +80,6 @@ class NFSP(rl_agent.AbstractAgent):
       avg_networks: nn.Module = None,
       q_net_optimizers: torch.optim.Optimizer = None,
       q_networks: nn.Module = None,
-      **kwargs,
   ) -> None:
     self._game = game
     self._num_actions = num_actions
@@ -89,26 +87,31 @@ class NFSP(rl_agent.AbstractAgent):
     self._learn_every = learn_every
     self._anticipatory_param = anticipatory_param
     self._min_buffer_size_to_learn = min_buffer_size_to_learn
-
+    self._num_players = num_players
     self._reservoir_buffers = [ReservoirBuffer(reservoir_buffer_capacity) for _ in range(num_players)]
-    self._prev_state = None
-    self._prev_action = None
+    self._prev_state = [None for _ in range(num_players)]
+    self._prev_action = [None for _ in range(num_players)]
 
     # Step counter to keep track of learning.
     self._step_counters = [0 for _ in range(num_players)]
-
     self._rl_agents = [DQN(
-        player_id,
-        state_representation_size,
-        num_actions,
+        player_id=player_id,
+        num_actions=num_actions,
+        replay_buffer_capacity=reservoir_buffer_capacity,
+        batch_size=batch_size,
+        update_target_network_every=128,
+        min_buffer_size_to_learn=min_buffer_size_to_learn,
+        epsilon_start=0.08,
+        epsilon_end=0.001,
+        epsilon_decay_duration=1000000,
         optimizer=q_net_optimizers[player_id],
         q_network=q_networks[player_id],
-        **kwargs,
+        loss_str="mse",
     ) for player_id in range(num_players)]
 
     # Keep track of the last training loss achieved in an update step.
-    self._last_rl_loss_value = lambda: self._rl_agent.loss
-    self._last_sl_loss_value = None
+    self._last_rl_loss_values = [None for _ in range(num_players)]
+    self._last_sl_loss_values = [None for _ in range(num_players)]
 
     # Average policy network.
     self._avg_networks = avg_networks
@@ -125,34 +128,59 @@ class NFSP(rl_agent.AbstractAgent):
     self._sample_episode_policy()
     
   def update_networks(self, q_networks, avg_networks, q_net_optimizers, avg_net_optimizers):
+    """Update the networks and optimizers with new parameters.
+    
+    Args:
+      q_networks: List of state dictionaries for Q-networks
+      avg_networks: List of state dictionaries for average policy networks  
+      q_net_optimizers: List of state dictionaries for Q-network optimizers
+      avg_net_optimizers: List of state dictionaries for average policy optimizers
+    """
     for i in range(self._num_players):
-      self._rl_agents[i].q_network.load_state_dict(q_networks[i])
+      # Load Q-network parameters
+      self._rl_agents[i]._q_network.load_state_dict(q_networks[i])
+      # Load average policy network parameters
       self._avg_networks[i].load_state_dict(avg_networks[i])
-      self._q_net_optimizers[i].load_state_dict(q_net_optimizers[i])
-      self._avg_net_optimizers[i].load_state_dict(avg_net_optimizers[i])
+      # Load optimizer states
+      self._rl_agents[i]._optimizer.load_state_dict(q_net_optimizers[i])
+      self._optimizers[i].load_state_dict(avg_net_optimizers[i])
   
   # ---------------------------------------------------------------------------
   # Acting
   # ---------------------------------------------------------------------------
   
   def traverse_game(self):
-    state = self._game.reset()
-    while True:
-      if state.chance_node():
+    """Traverse a complete game episode."""
+    state = self._game.new_initial_state()
+    while not state.is_terminal():
+      if state.is_chance_node():
         legal_actions = state.legal_actions()
         action = np.random.choice(legal_actions)
-        state = self._game.step([action])
+        state = state.child(action)
       else:
-        action = self.step(state)
-        if state.is_terminal():
-          break
-        state = state.apply_action(action)
-    return True  
+        action = self.step(state, state.current_player())
+        state = state.child(action)
+    # final step for both players
+    for player_id in range(self._num_players):
+      self.step(state, player_id)
+    self._prev_state = [None for _ in range(self._num_players)]
+    self._prev_action = [None for _ in range(self._num_players)]
+    self._sample_episode_policy()
+    
+    
+
   def _sample_episode_policy(self):
-    if np.random.rand() < self._anticipatory_param:
-      self._mode = MODE.best_response
-    else:
-      self._mode = MODE.average_policy
+    # Sample an episode policy *independently for each player* so that
+    # best-response / average-policy episodes are not perfectly
+    # synchronised across all players.  This matches the design of the
+    # reference implementation where each NFSP agent (one per player)
+    # samples its own mode.
+    self._modes = []
+    for _ in range(self._num_players):
+      if np.random.rand() < self._anticipatory_param:
+        self._modes.append(MODE.best_response)
+      else:
+        self._modes.append(MODE.average_policy)
 
   def _act(self, info_state, legal_actions, player_id):
     info_state_t = torch.Tensor(np.reshape(info_state, [1, -1]))
@@ -179,46 +207,77 @@ class NFSP(rl_agent.AbstractAgent):
 
   @property
   def mode(self):
-    return self._mode
+    # Expose the list of per-player modes for inspection.
+    return self._modes
 
-  @property
-  def loss(self):
-    return (self._last_sl_loss_value, self._last_rl_loss_value())
+  # Adding a helper method for Ray remote access to loss since @property cannot be
+  # accessed with `.remote()` syntax from an actor handle. This ensures the
+  # ParameterServer can query the current loss safely.
+  def get_loss(self, player_id):
+    """Return current supervised and reinforcement learning losses."""
+    return self._last_sl_loss_values[player_id], self._last_rl_loss_values[player_id]
+
   # ---------------------------------------------------------------------------
   # RL-Agent compatible interface
   # ---------------------------------------------------------------------------
-  def step(self, state, is_evaluation: bool = False):
+  def step(self, state, player_id, is_evaluation: bool = False):
     """Returns the action to be taken and updates the networks if needed."""
-    if self._mode == MODE.best_response:
-      action, probs = self._rl_agents[state.current_player()].step(state, is_evaluation)
+    action = None
+    mode = self._modes[player_id]
+    if mode == MODE.best_response:
+      action, probs = self._rl_agents[player_id].step(state, is_evaluation)
       if not is_evaluation and not state.is_terminal():
         self._add_transition(state, probs)
-
-    elif self._mode == MODE.average_policy:
+  
+    elif mode == MODE.average_policy:
       if not state.is_terminal():
-        info_state = state.info_state_tensor()
+        info_state = state.information_state_tensor()
         legal_actions = state.legal_actions()
-        action, _ = self._act(info_state, legal_actions, state.current_player())
+        action, _ = self._act(info_state, legal_actions, player_id)
 
-      # Feed experience to RL agent.
-      if self._prev_state and not is_evaluation:
-        self._rl_agents[state.current_player()].add_transition(self._prev_state, self._prev_action, state)
-        
-      if state.is_terminal():
-        self._prev_state = None
-        self._prev_action = None
-        return None
-      else:
-        self._prev_state = state
-        self._prev_action = action
+      # Feed the (s,a,s') transition to the RL agent using the *previous*
+      # state/action stored for this player, exactly as in the reference
+      # OpenSpiel NFSP implementation.
+      if (
+          not is_evaluation
+          and self._prev_state[player_id] is not None
+      ):
+        self._rl_agents[player_id].add_transition(
+            self._prev_state[player_id],
+            self._prev_action[player_id],
+            state,
+        )
+
     else:
-      raise ValueError(f"Invalid mode ({self._mode})")
+      raise ValueError(f"Invalid mode ({mode})")
+    
+    if not state.is_terminal():
+      self._prev_state[player_id] = state
+      self._prev_action[player_id] = action
+    else:
+      # Episode finished – clear stored previous references for this player
+      self._prev_state[player_id] = None
+      self._prev_action[player_id] = None
     return action
   
   def learn_br_rl(self, player_id):    
-    gradients_sl, self._last_sl_loss_value = self._learn(player_id)
-    gradients_rl, self._last_rl_loss_value = self._rl_agents[player_id].learn()
-    return gradients_sl, gradients_rl
+    """Learn and return gradients for both average and Q networks."""
+    try:
+      gradients_sl, self._last_sl_loss_values[player_id] = self._learn(player_id)
+      gradients_rl, self._last_rl_loss_values[player_id] = self._rl_agents[player_id].learn()
+      
+      # Return empty gradients if learning didn't happen due to insufficient data
+      if gradients_sl is None:
+        gradients_sl = {}
+      if gradients_rl is None:
+        gradients_rl = {}
+        
+      return gradients_sl, gradients_rl
+      
+    except Exception as e:
+      print(f"Error in learn_br_rl for player {player_id}: {e}")
+      # Return empty gradient dictionaries instead of None
+      return {}, {}
   
   # ---------------------------------------------------------------------------
   # Training helpers
@@ -230,7 +289,7 @@ class NFSP(rl_agent.AbstractAgent):
     legal_actions_mask = np.zeros(self._num_actions)
     legal_actions_mask[legal_actions] = 1.0
     transition = Transition(
-        info_state=state.info_state_tensor()[:],
+        info_state=state.information_state_tensor()[:],
         action_probs=probs,
         legal_actions_mask=legal_actions_mask,
     )
@@ -249,7 +308,7 @@ class NFSP(rl_agent.AbstractAgent):
     if len(self._reservoir_buffers[player_id]) < max(
         self._batch_size, self._min_buffer_size_to_learn
     ):
-      return None
+      return None, None
 
     # Sample a batch from the reservoir buffer.
     transitions = self._reservoir_buffers[player_id].sample(self._batch_size)

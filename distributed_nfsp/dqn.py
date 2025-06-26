@@ -135,7 +135,6 @@ class DQN(rl_agent.AbstractAgent):
     self._num_actions = num_actions
     self._batch_size = batch_size
     self._update_target_network_every = update_target_network_every
-    self._learn_every = learn_every
     self._min_buffer_size_to_learn = min_buffer_size_to_learn
     self._discount_factor = discount_factor
 
@@ -163,7 +162,7 @@ class DQN(rl_agent.AbstractAgent):
     
     self._optimizer = optimizer
 
-  def step(self, time_step, is_evaluation=False, add_transition_record=True):
+  def step(self, state, is_evaluation=False, add_transition_record=True):
     """Returns the action to be taken and updates the Q-network if needed.
 
     Args:
@@ -176,11 +175,11 @@ class DQN(rl_agent.AbstractAgent):
     """
 
     # Act step: don't act at terminal info states or if its not our turn.
-    if (not time_step.last()) and (
-        time_step.is_simultaneous_move() or
-        self.player_id == time_step.current_player()):
-      info_state = time_step.observations["info_state"][self.player_id]
-      legal_actions = time_step.observations["legal_actions"][self.player_id]
+    if (not state.is_terminal()) and (
+        state.is_simultaneous_node() or
+        self.player_id == state.current_player()):
+      info_state = state.information_state_tensor()
+      legal_actions = state.legal_actions()
       epsilon = self._get_epsilon(is_evaluation)
       action, probs = self._epsilon_greedy(info_state, legal_actions, epsilon)
     else:
@@ -197,25 +196,25 @@ class DQN(rl_agent.AbstractAgent):
 
     return action, probs
 
-  def add_transition(self, prev_time_step, prev_action, time_step):
+  def add_transition(self, prev_state, prev_action, state):
     """Adds the new transition using `time_step` to the replay buffer.
 
     Args:
-      prev_time_step: prev ts, an instance of rl_environment.TimeStep.
-      prev_action: int, action taken at `prev_time_step`.
-      time_step: current ts, an instance of rl_environment.TimeStep.
+      prev_state: prev state, an instance of rl_environment.TimeStep.
+      prev_action: int, action taken at `prev_state`.
+      state: current state, an instance of rl_environment.TimeStep.
     """
-    assert prev_time_step is not None
-    legal_actions = (time_step.observations["legal_actions"][self.player_id])
+    assert prev_state is not None
+    legal_actions = (state.legal_actions())
     legal_actions_mask = np.zeros(self._num_actions)
     legal_actions_mask[legal_actions] = 1.0
     transition = Transition(
         info_state=(
-            prev_time_step.observations["info_state"][self.player_id][:]),
+            prev_state.information_state_tensor()[:]),
         action=prev_action,
-        reward=time_step.rewards[self.player_id],
-        next_info_state=time_step.observations["info_state"][self.player_id][:],
-        is_final_step=float(time_step.last()),
+        reward=state.returns()[self.player_id],
+        next_info_state=state.information_state_tensor(self.player_id)[:],
+        is_final_step=float(state.is_terminal()),
         legal_actions_mask=legal_actions_mask)
     self._replay_buffer.add(transition)
 
@@ -269,7 +268,7 @@ class DQN(rl_agent.AbstractAgent):
         len(self._replay_buffer) < self._batch_size
         or len(self._replay_buffer) < self._min_buffer_size_to_learn
     ):
-      return None
+      return None, None
 
     # -----------------------------------------------------------------------
     # Sample a mini-batch of transitions.
@@ -307,6 +306,9 @@ class DQN(rl_agent.AbstractAgent):
     self._optimizer.zero_grad()
     loss.backward()
 
+    # Keep the most recent loss value (scalar) for external access.
+    self._last_loss_value = loss.item()
+
     # -----------------------------------------------------------------------
     # Collect gradients BEFORE the optimiser step so external callers can
     # inspect / aggregate them if desired.
@@ -316,11 +318,6 @@ class DQN(rl_agent.AbstractAgent):
         for name, param in self._q_network.named_parameters()
         if param.grad is not None
     }
-
-    self._optimizer.step()
-
-    # Keep the most recent loss value (scalar) for external access.
-    self._last_loss_value = loss.item()
 
     # -----------------------------------------------------------------------
     # Return both gradients and loss.
@@ -334,10 +331,6 @@ class DQN(rl_agent.AbstractAgent):
   @property
   def replay_buffer(self):
     return self._replay_buffer
-
-  @property
-  def loss(self):
-    return self._last_loss_value
 
   @property
   def step_counter(self):
@@ -405,3 +398,7 @@ class DQN(rl_agent.AbstractAgent):
     self._target_q_network = torch.load(data_path)
     if optimizer_data_path is not None:
       self._optimizer = torch.load(optimizer_data_path)
+
+  @property
+  def loss(self):
+    return getattr(self, "_last_loss_value", None)
