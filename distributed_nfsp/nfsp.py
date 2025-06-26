@@ -45,24 +45,7 @@ Transition = collections.namedtuple(
 MODE = enum.Enum("mode", "best_response average_policy")
 
 
-class MLP(nn.Module):
-  """Simple MLP identical to the one used in the DQN PyTorch agent."""
-
-  def __init__(self, in_size: int, hidden_sizes: Sequence[int], out_size: int):
-    super().__init__()
-    sizes = list(hidden_sizes) + [out_size]
-    layers: List[nn.Module] = []
-    for hs in sizes[:-1]:
-      layers.append(nn.Linear(in_size, hs))
-      layers.append(nn.ReLU())
-      in_size = hs
-    layers.append(nn.Linear(in_size, sizes[-1]))  # last layer – no activation
-    self._model = nn.Sequential(*layers)
-
-  def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore
-    return self._model(x)
-
-@ray.remote(num_cpus=1, namespace="nfsp")
+# @ray.remote(num_cpus=1, namespace="nfsp")
 class NFSP(rl_agent.AbstractAgent):
   """NFSP Agent implementation in PyTorch."""
 
@@ -71,15 +54,16 @@ class NFSP(rl_agent.AbstractAgent):
       game,
       num_players: int,
       num_actions: int,
+      replay_buffer_capacity: int,
       reservoir_buffer_capacity: int,
       anticipatory_param: float,
       batch_size: int = 128,
       min_buffer_size_to_learn: int = 1000,
-      learn_every: int = 64,
-      avg_net_optimizers: torch.optim.Optimizer = None,
-      avg_networks: nn.Module = None,
-      q_net_optimizers: torch.optim.Optimizer = None,
-      q_networks: nn.Module = None,
+      learn_every: int = 10,
+      avg_net_optimizers = [],
+      avg_networks = [],
+      q_net_optimizers = [],
+      q_networks = [],
   ) -> None:
     self._game = game
     self._num_actions = num_actions
@@ -91,19 +75,18 @@ class NFSP(rl_agent.AbstractAgent):
     self._reservoir_buffers = [ReservoirBuffer(reservoir_buffer_capacity) for _ in range(num_players)]
     self._prev_state = [None for _ in range(num_players)]
     self._prev_action = [None for _ in range(num_players)]
-
     # Step counter to keep track of learning.
     self._step_counters = [0 for _ in range(num_players)]
     self._rl_agents = [DQN(
         player_id=player_id,
         num_actions=num_actions,
-        replay_buffer_capacity=reservoir_buffer_capacity,
+        replay_buffer_capacity=replay_buffer_capacity,
         batch_size=batch_size,
-        update_target_network_every=128,
+        update_target_network_every=1000,
         min_buffer_size_to_learn=min_buffer_size_to_learn,
-        epsilon_start=0.08,
-        epsilon_end=0.001,
-        epsilon_decay_duration=1000000,
+        epsilon_start=1,
+        epsilon_end=0.1,
+        epsilon_decay_duration=10000,
         optimizer=q_net_optimizers[player_id],
         q_network=q_networks[player_id],
         loss_str="mse",
@@ -156,10 +139,10 @@ class NFSP(rl_agent.AbstractAgent):
       if state.is_chance_node():
         legal_actions = state.legal_actions()
         action = np.random.choice(legal_actions)
-        state = state.child(action)
+        state.apply_action(action)
       else:
-        action = self.step(state, state.current_player())
-        state = state.child(action)
+        action, _ = self.step(state, state.current_player())
+        state.apply_action(action)
     # final step for both players
     for player_id in range(self._num_players):
       self.step(state, player_id)
@@ -223,17 +206,24 @@ class NFSP(rl_agent.AbstractAgent):
   def step(self, state, player_id, is_evaluation: bool = False):
     """Returns the action to be taken and updates the networks if needed."""
     action = None
-    mode = self._modes[player_id]
+    probs = None
+    if is_evaluation:
+      mode = MODE.average_policy
+    else:
+      mode = self._modes[player_id]
     if mode == MODE.best_response:
       action, probs = self._rl_agents[player_id].step(state, is_evaluation)
       if not is_evaluation and not state.is_terminal():
-        self._add_transition(state, probs)
+        self._add_transition(state, probs, player_id)
   
     elif mode == MODE.average_policy:
       if not state.is_terminal():
-        info_state = state.information_state_tensor()
-        legal_actions = state.legal_actions()
-        action, _ = self._act(info_state, legal_actions, player_id)
+        # Fetch the perspective of the *acting* player, not the default
+        # current_player(), otherwise both agents would sometimes receive the
+        # wrong private card information in Kuhn Poker and similar games.
+        info_state = state.information_state_tensor(player_id)
+        legal_actions = state.legal_actions(player_id)
+        action, probs = self._act(info_state, legal_actions, player_id)
 
       # Feed the (s,a,s') transition to the RL agent using the *previous*
       # state/action stored for this player, exactly as in the reference
@@ -247,53 +237,65 @@ class NFSP(rl_agent.AbstractAgent):
             self._prev_action[player_id],
             state,
         )
-
     else:
       raise ValueError(f"Invalid mode ({mode})")
     
-    if not state.is_terminal():
-      self._prev_state[player_id] = state
-      self._prev_action[player_id] = action
-    else:
-      # Episode finished – clear stored previous references for this player
-      self._prev_state[player_id] = None
-      self._prev_action[player_id] = None
-    return action
+    if not is_evaluation:
+      self._step_counters[player_id] += 1
+      if self._step_counters[player_id] % self._learn_every == 0:
+        self.learn_br_rl(player_id)
+        
+      if not state.is_terminal():
+        # Store a CLONE of the current state so that subsequent in-place
+        # modifications (state.apply_action) do not mutate the experience we
+        # are about to record in the replay buffer. Using the un-cloned state
+        # would result in transitions whose "previous" and "next" states are
+        # actually identical, which severely hurts learning.
+        self._prev_state[player_id] = state.clone()
+        self._prev_action[player_id] = action
+      else:
+        # Episode finished – clear stored previous references for this player
+        self._prev_state[player_id] = None
+        self._prev_action[player_id] = None
+    return action, probs
   
   def learn_br_rl(self, player_id):    
-    """Learn and return gradients for both average and Q networks."""
-    try:
-      gradients_sl, self._last_sl_loss_values[player_id] = self._learn(player_id)
-      gradients_rl, self._last_rl_loss_values[player_id] = self._rl_agents[player_id].learn()
-      
-      # Return empty gradients if learning didn't happen due to insufficient data
-      if gradients_sl is None:
-        gradients_sl = {}
-      if gradients_rl is None:
-        gradients_rl = {}
-        
-      return gradients_sl, gradients_rl
-      
-    except Exception as e:
-      print(f"Error in learn_br_rl for player {player_id}: {e}")
-      # Return empty gradient dictionaries instead of None
-      return {}, {}
+    """Learn both the supervised (average policy) and reinforcement learning
+    (best-response) networks for `player_id` and keep track of the losses.
+
+    Returns
+    -------
+    Tuple[Optional[float], Optional[float]]
+        The supervised-learning loss and the RL loss obtained in this update.
+    """
+    # Supervised-learning (SL) update on the reservoir buffer.
+    sl_loss = self._learn(player_id)
+
+    # Reinforcement-learning (RL) update on the replay buffer of the DQN.
+    rl_loss = self._rl_agents[player_id].learn()
+
+    # Record the most recent loss values so they can be inspected/logged.
+    self._last_sl_loss_values[player_id] = sl_loss
+    self._last_rl_loss_values[player_id] = rl_loss
+
+    return sl_loss, rl_loss
+  
   
   # ---------------------------------------------------------------------------
   # Training helpers
-  # ---------------------------------------------------------------------------
+  #---------------------------------------------------------------------------
 
-  def _add_transition(self, state, probs):
+  def _add_transition(self, state, probs, player_id):
     """Adds a transition to the supervised reservoir buffer."""
-    legal_actions = state.legal_actions()
+    legal_actions = state.legal_actions(player_id)
     legal_actions_mask = np.zeros(self._num_actions)
     legal_actions_mask[legal_actions] = 1.0
     transition = Transition(
-        info_state=state.information_state_tensor()[:],
+        info_state=state.information_state_tensor(player_id),
         action_probs=probs,
         legal_actions_mask=legal_actions_mask,
     )
-    self._reservoir_buffers[state.current_player()].add(transition)
+    self._reservoir_buffers[player_id].add(transition)
 
   def _loss_avg(self, logits, target_action_probs):
     """Cross-entropy loss between target action probs and network logits."""
@@ -308,7 +310,7 @@ class NFSP(rl_agent.AbstractAgent):
     if len(self._reservoir_buffers[player_id]) < max(
         self._batch_size, self._min_buffer_size_to_learn
     ):
-      return None, None
+      return None
 
     # Sample a batch from the reservoir buffer.
     transitions = self._reservoir_buffers[player_id].sample(self._batch_size)
@@ -326,16 +328,9 @@ class NFSP(rl_agent.AbstractAgent):
     # Backward pass – we compute gradients but DO NOT apply an optimiser step.
     self._optimizers[player_id].zero_grad()
     loss_val.backward()
-
-    # Collect gradients to return.
-    gradients = {
-        name: param.grad.detach().clone()
-        for name, param in self._avg_networks[player_id].named_parameters()
-        if param.grad is not None
-    }
-
-    # Return both the scalar loss value and the gradients.
-    return gradients, loss_val.item()
+    # step optimizer
+    self._optimizers[player_id].step()
+    return loss_val.item()
 
   # -------------------------------------------------
   # Checkpointing utilities – Not yet implemented 

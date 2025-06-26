@@ -33,80 +33,6 @@ Transition = collections.namedtuple(
 ILLEGAL_ACTION_LOGITS_PENALTY = torch.finfo(torch.float).min
 
 
-class SonnetLinear(nn.Module):
-  """A Sonnet linear module.
-
-  Always includes biases and only supports ReLU activations.
-  """
-
-  def __init__(self, in_size, out_size, activate_relu=True):
-    """Creates a Sonnet linear layer.
-
-    Args:
-      in_size: (int) number of inputs
-      out_size: (int) number of outputs
-      activate_relu: (bool) whether to include a ReLU activation layer
-    """
-    super(SonnetLinear, self).__init__()
-    self._activate_relu = activate_relu
-    stddev = 1.0 / math.sqrt(in_size)
-    mean = 0
-    lower = (-2 * stddev - mean) / stddev
-    upper = (2 * stddev - mean) / stddev
-    # Weight initialization inspired by Sonnet's Linear layer,
-    # which cites https://arxiv.org/abs/1502.03167v3
-    # pytorch default: initialized from
-    # uniform(-sqrt(1/in_features), sqrt(1/in_features))
-    self._weight = nn.Parameter(
-        torch.Tensor(
-            stats.truncnorm.rvs(
-                lower, upper, loc=mean, scale=stddev, size=[out_size,
-                                                            in_size])))
-    self._bias = nn.Parameter(torch.zeros([out_size]))
-
-  def forward(self, tensor):
-    y = F.linear(tensor, self._weight, self._bias)
-    return F.relu(y) if self._activate_relu else y
-
-
-class MLP(nn.Module):
-  """A simple network built from nn.linear layers."""
-
-  def __init__(self,
-               input_size,
-               hidden_sizes,
-               output_size,
-               activate_final=False):
-    """Create the MLP.
-
-    Args:
-      input_size: (int) number of inputs
-      hidden_sizes: (list) sizes (number of units) of each hidden layer
-      output_size: (int) number of outputs
-      activate_final: (bool) should final layer should include a ReLU
-    """
-
-    super(MLP, self).__init__()
-    self._layers = []
-    # Hidden layers
-    for size in hidden_sizes:
-      self._layers.append(SonnetLinear(in_size=input_size, out_size=size))
-      input_size = size
-    # Output layer
-    self._layers.append(
-        SonnetLinear(
-            in_size=input_size,
-            out_size=output_size,
-            activate_relu=activate_final))
-
-    self.model = nn.ModuleList(self._layers)
-
-  def forward(self, x):
-    for layer in self.model:
-      x = layer(x)
-    return x
-
-
 class DQN(rl_agent.AbstractAgent):
   """DQN Agent implementation in PyTorch.
 
@@ -116,11 +42,10 @@ class DQN(rl_agent.AbstractAgent):
   def __init__(self,
                player_id,
                num_actions,
-               replay_buffer_capacity=10000,
+               replay_buffer_capacity=int(2e5),
                batch_size=128,
                replay_buffer_class=ReplayBuffer,
-               update_target_network_every=1000,
-               learn_every=10,
+               update_target_network_every=1000,  
                discount_factor=1.0,
                min_buffer_size_to_learn=1000,
                epsilon_start=1.0,
@@ -162,6 +87,9 @@ class DQN(rl_agent.AbstractAgent):
     
     self._optimizer = optimizer
 
+    # Keep track of the last training loss achieved in an update step.
+    self._last_loss_value = None
+
   def step(self, state, is_evaluation=False, add_transition_record=True):
     """Returns the action to be taken and updates the Q-network if needed.
 
@@ -189,6 +117,8 @@ class DQN(rl_agent.AbstractAgent):
     # Don't mess up with the state during evaluation.
     if not is_evaluation:
       self._step_counter += 1
+
+      # Periodically update the target network.
       if self._step_counter % self._update_target_network_every == 0:
         # state_dict method returns a dictionary containing a whole state of the
         # module.
@@ -210,10 +140,10 @@ class DQN(rl_agent.AbstractAgent):
     legal_actions_mask[legal_actions] = 1.0
     transition = Transition(
         info_state=(
-            prev_state.information_state_tensor()[:]),
+            prev_state.information_state_tensor(self.player_id)),
         action=prev_action,
         reward=state.returns()[self.player_id],
-        next_info_state=state.information_state_tensor(self.player_id)[:],
+        next_info_state=state.information_state_tensor(self.player_id),
         is_final_step=float(state.is_terminal()),
         legal_actions_mask=legal_actions_mask)
     self._replay_buffer.add(transition)
@@ -308,21 +238,12 @@ class DQN(rl_agent.AbstractAgent):
 
     # Keep the most recent loss value (scalar) for external access.
     self._last_loss_value = loss.item()
-
-    # -----------------------------------------------------------------------
-    # Collect gradients BEFORE the optimiser step so external callers can
-    # inspect / aggregate them if desired.
-    # -----------------------------------------------------------------------
-    gradients = {
-        name: param.grad.detach().clone()
-        for name, param in self._q_network.named_parameters()
-        if param.grad is not None
-    }
+    self._optimizer.step()
 
     # -----------------------------------------------------------------------
     # Return both gradients and loss.
     # -----------------------------------------------------------------------
-    return gradients, self._last_loss_value
+    return self._last_loss_value
 
   @property
   def q_values(self):
