@@ -4,8 +4,29 @@ from Evaluator import Evaluator
 import ray
 import pickle
 from MLPs import BR_MLP, AVG_MLP
+from open_spiel.python import policy
+# exploitability
+from open_spiel.python.algorithms import exploitability
+class NFSPPolicies(policy.Policy):
+  """Joint policy constructed from the NFSP agents for evaluation."""
 
-@ray.remote(num_cpus=2, namespace="nfsp")
+  def __init__(self, env, nfsp_actor):
+    game = env
+    player_ids = [0, 1]
+    super().__init__(game, player_ids)
+    self._actor = nfsp_actor
+    
+  def action_probabilities(self, state):
+    cur_player = state.current_player()
+
+    legal_actions = state.legal_actions()
+    # Ask the NFSP actor for an action (deterministic in evaluation mode).
+    _, probs = ray.get(self._actor.step.remote(state, cur_player, is_evaluation=True))
+
+    # Build a full probability distribution over all legal actions.
+    return {a: float(probs[a]) for a in legal_actions}
+  
+@ray.remote(num_cpus=4, namespace="nfsp")
 class Learner:
     def __init__(self, **kwargs):
       self.game = kwargs["game"]
@@ -34,7 +55,7 @@ class Learner:
       # Create a dedicated evaluator actor
       self.evaluator = Evaluator.options(name="evaluator", namespace="nfsp", lifetime="detached").remote(
             self.game, self.num_players, self.num_actions)
-      breakpoint()
+      self.actors = []
     def push_networks(self):
       q_net_state_dicts = [q_network.state_dict() for q_network in self.q_networks]
       avg_net_state_dicts = [avg_network.state_dict() for avg_network in self.avg_networks]
@@ -100,31 +121,38 @@ class Learner:
         
         if param_grads:
           # Average the gradients
-          aggregated[param_name] = torch.stack(param_grads).mean(dim=0)
+          aggregated_grad = torch.stack(param_grads).mean(dim=0)
+          aggregated[param_name] = aggregated_grad
           
       return aggregated
     
     def apply_gradients_to_avg_network(self, aggregated_gradients, player_id):
-      """Apply aggregated gradients to average policy network."""
+      """Apply aggregated gradients to average policy network using optimizer."""
       if not aggregated_gradients:
         return
         
-      with torch.no_grad():
-        for name, param in self.avg_networks[player_id].named_parameters():
-          if name in aggregated_gradients:
-            # Apply gradient with learning rate
-            param.data.add_(aggregated_gradients[name], alpha=-self.learning_rate)
+      # Set the gradients on the network parameters
+      for name, param in self.avg_networks[player_id].named_parameters():
+        if name in aggregated_gradients:
+          param.grad = aggregated_gradients[name].to(param.device)
+      
+      # Use the optimizer to apply the gradients (respects momentum, weight decay, etc.)
+      self.avg_net_optimizers[player_id].step()
+      self.avg_net_optimizers[player_id].zero_grad()
 
     def apply_gradients_to_q_network(self, aggregated_gradients, player_id):
-      """Apply aggregated gradients to Q-network."""
+      """Apply aggregated gradients to Q-network using optimizer."""
       if not aggregated_gradients:
         return
         
-      with torch.no_grad():
-        for name, param in self.q_networks[player_id].named_parameters():
-          if name in aggregated_gradients:
-            # Apply gradient with learning rate
-            param.data.add_(aggregated_gradients[name], alpha=-self.learning_rate)
+      # Set the gradients on the network parameters  
+      for name, param in self.q_networks[player_id].named_parameters():
+        if name in aggregated_gradients:
+          param.grad = aggregated_gradients[name].to(param.device)
+      
+      # Use the optimizer to apply the gradients
+      self.q_net_optimizers[player_id].step()
+      self.q_net_optimizers[player_id].zero_grad()
           
     def send_networks_to_workers(self):
       """Broadcast the latest parameters to all actors.
@@ -177,28 +205,32 @@ class Learner:
           
     def start(self):
         """Main training loop with the profiling logic removed."""
-
+        send_networks = True
         # Create the remote NFSP actors.
         self.create_actors()
+        evaluation_policy = NFSPPolicies(self.game, self.actors[0])
         for iteration in range(self.num_train_episodes*self.num_actors):
             # ------------------------------------------------------------------
             # 1) Distribute the latest parameters to all actors
             # ------------------------------------------------------------------
-            self.send_networks_to_workers()
+            if send_networks:
+              self.send_networks_to_workers()
+              send_networks = False
 
             # ------------------------------------------------------------------
             # 2) Periodic evaluation + loss querying
             # ------------------------------------------------------------------
             if (iteration + 1) % self.eval_every == 0:
                 # 2-a) Evaluation.
-                eval_ref = self.evaluator.comprehensive_evaluation.remote(
-                    self.q_networks,
-                    self.avg_networks,
-                    num_head_to_head_episodes=100,
-                )
-                eval_results = ray.get(eval_ref)
-                print(f"Iteration {iteration+1} - Evaluation Results:\n{eval_results}")
-
+                # eval_ref = self.evaluator.comprehensive_evaluation.remote(
+                #     self.q_networks,
+                #     self.avg_networks,
+                #     num_head_to_head_episodes=100,
+                # )
+                # eval_results = ray.get(eval_ref)
+                # print(f"Iteration {iteration+1} - Evaluation Results:\n{eval_results}")
+                nash_conv = exploitability.exploitability(self.game, evaluation_policy)
+                print(f"Iteration {iteration+1} - Nash Conv: {nash_conv}")
                 # 2-b) Fetch per-actor loss values.
                 loss_refs = [
                     actor.get_loss.remote(player)
@@ -213,25 +245,29 @@ class Learner:
             # ------------------------------------------------------------------
             # 3) Generate trajectories (self-play)
             # ------------------------------------------------------------------
-            gradients_sl_by_player, gradients_br_by_player = ray.get([actor.traverse_game.remote(iteration) for actor in self.actors])
-            breakpoint()
-            print(f"Gradients SL: {gradients_sl_by_player}")
-            print(f"Gradients BR: {gradients_br_by_player}")
+            grads_output = ray.get([actor.traverse_game.remote(iteration) for actor in self.actors])
+            # grads_output[i] = (sl_gradients_list, br_gradients_list) for actor i
+            # where sl_gradients_list[player] and br_gradients_list[player] are the gradients for that player
+            sl_gradients = [[] for _ in range(self.num_players)]
+            br_gradients = [[] for _ in range(self.num_players)]
+            for i in range(self.num_actors):
+                actor_sl_grads, actor_br_grads = grads_output[i]  # unpack (sl_list, br_list)
+                for player in range(self.num_players):
+                    if actor_sl_grads[player] is not None:
+                        sl_gradients[player].append(actor_sl_grads[player])
+                    if actor_br_grads[player] is not None:
+                        br_gradients[player].append(actor_br_grads[player])
             
             # ------------------------------------------------------------------
             # 4) Aggregate gradients & apply updates to central networks
             # ------------------------------------------------------------------
             
             for player in range(self.num_players):
-                agg_br = self.aggregate_gradients(gradients_br_by_player[player])
-                agg_sl = self.aggregate_gradients(gradients_sl_by_player[player])
-                if agg_br:
-                    self.apply_gradients_to_avg_network(agg_br, player)
-                if agg_sl:
-                    self.apply_gradients_to_q_network(agg_sl, player)
-
-            # ------------------------------------------------------------------
-            # 5) Push updated parameters back to the actors
-            # ------------------------------------------------------------------
-            self.send_networks_to_workers()
-            print(f"Completed iteration {iteration + 1}/{self.num_train_episodes*self.num_actors}")
+                agg_br = self.aggregate_gradients(br_gradients[player])
+                agg_sl = self.aggregate_gradients(sl_gradients[player])
+                if agg_br and agg_sl:
+                    self.apply_gradients_to_avg_network(agg_sl, player)  # SL gradients → AVG network
+                    self.apply_gradients_to_q_network(agg_br, player)    # BR gradients → Q network
+                    send_networks = True
+            if iteration % 1000 == 0:
+              print(f"Completed iteration {iteration + 1}/{self.num_train_episodes*self.num_actors}")

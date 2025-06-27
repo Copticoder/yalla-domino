@@ -44,7 +44,6 @@ Transition = collections.namedtuple(
 MODE = enum.Enum("mode", "best_response average_policy")
 
 
-# @ray.remote(num_cpus=1, namespace="nfsp")
 class NFSP(rl_agent.AbstractAgent):
   """NFSP Agent implementation in PyTorch."""
 
@@ -154,11 +153,11 @@ class NFSP(rl_agent.AbstractAgent):
       self.step(state, player_id)
     if episode_num % self._learn_every == 0:
       for player_id in range(self._num_players):
-        sl_gradients, sl_loss, br_gradients, rl_loss = self.learn_br_rl(player_id)
+        sl_gradient, sl_loss, br_gradient, rl_loss = self.learn_br_rl(player_id)
         self._last_sl_loss_values[player_id] = sl_loss
         self._last_rl_loss_values[player_id] = rl_loss
-        sl_gradients[player_id] = sl_gradients
-        br_gradients[player_id] = br_gradients
+        sl_gradients[player_id] = sl_gradient
+        br_gradients[player_id] = br_gradient
       
     self._sample_episode_policy()
     self._prev_state = [None for _ in range(self._num_players)]
@@ -322,7 +321,7 @@ class NFSP(rl_agent.AbstractAgent):
     if len(self._reservoir_buffers[player_id]) < max(
         self._batch_size, self._min_buffer_size_to_learn
     ):
-      return None
+      return None, None
 
     # Sample a batch from the reservoir buffer.
     transitions = self._reservoir_buffers[player_id].sample(self._batch_size)

@@ -54,23 +54,23 @@ flags.DEFINE_float("anticipatory_param", 0.1,
                    "Probability of using the RL best response as episode policy.")
 flags.DEFINE_integer("batch_size", 512,
                      "Batch size for the DQN.")
-flags.DEFINE_integer("num_actors", 2,
+flags.DEFINE_integer("num_actors", 1,
                      "Number of actors.")
 flags.DEFINE_integer("update_target_network_every", 1000,
                      "Number of steps between updating the target network.")
 flags.DEFINE_float("discount_factor", 1.0,
                    "Discount factor for the DQN.")
-flags.DEFINE_integer("min_buffer_size_to_learn", 1000,
+flags.DEFINE_integer("min_buffer_size_to_learn", 512,
                      "Minimum buffer size to learn.")
 flags.DEFINE_float("epsilon_start", 0.08,
                    "Starting epsilon for the epsilon-greedy policy.")
 flags.DEFINE_float("epsilon_end", 0.001,
                    "Ending epsilon for the epsilon-greedy policy.")
-flags.DEFINE_integer("epsilon_decay_duration", int(3e6),
+flags.DEFINE_integer("epsilon_decay_duration", int(1e6),
                      "Number of steps for the epsilon-greedy policy to decay.")
 flags.DEFINE_float("learning_rate", 0.01,
                    "Learning rate for the DQN.")
-flags.DEFINE_integer("learn_every", 5,
+flags.DEFINE_integer("learn_every", 64,
                      "Number of steps between learning updates.")
 
 # class NFSPPolicies(policy.Policy):
