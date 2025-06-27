@@ -235,15 +235,14 @@ class DQN(rl_agent.AbstractAgent):
 
     self._optimizer.zero_grad()
     loss.backward()
-
     # Keep the most recent loss value (scalar) for external access.
     self._last_loss_value = loss.item()
-    self._optimizer.step()
-
-    # -----------------------------------------------------------------------
-    # Return both gradients and loss.
-    # -----------------------------------------------------------------------
-    return self._last_loss_value
+    gradients = {}
+    for name, param in self._q_network.named_parameters():
+      if param.grad is not None:
+        # Clone & detach → move to CPU so it is serialisable.
+        gradients[name] = param.grad.detach().cpu().clone()
+    return gradients, self._last_loss_value
 
   @property
   def q_values(self):

@@ -38,7 +38,6 @@ import ray
 from open_spiel.python import rl_agent
 from dqn import DQN
 from open_spiel.python.utils.reservoir_buffer import ReservoirBuffer
-
 Transition = collections.namedtuple(
     "Transition", "info_state action_probs legal_actions_mask")
 
@@ -57,13 +56,17 @@ class NFSP(rl_agent.AbstractAgent):
       replay_buffer_capacity: int,
       reservoir_buffer_capacity: int,
       anticipatory_param: float,
-      batch_size: int = 128,
+      avg_net_optimizers: List[torch.optim.Optimizer],
+      avg_networks: List[torch.nn.Module],
+      q_net_optimizers: List[torch.optim.Optimizer],
+      q_networks: List[torch.nn.Module],
+      update_target_network_every: int = 1000,
+      epsilon_start: float = 0.08,
+      epsilon_end: float = 0.001,
+      epsilon_decay_duration: int = int(3e6),
+      batch_size: int = 512,
       min_buffer_size_to_learn: int = 1000,
-      learn_every: int = 10,
-      avg_net_optimizers = [],
-      avg_networks = [],
-      q_net_optimizers = [],
-      q_networks = [],
+      learn_every: int = 128,
   ) -> None:
     self._game = game
     self._num_actions = num_actions
@@ -82,11 +85,11 @@ class NFSP(rl_agent.AbstractAgent):
         num_actions=num_actions,
         replay_buffer_capacity=replay_buffer_capacity,
         batch_size=batch_size,
-        update_target_network_every=1000,
+        update_target_network_every=update_target_network_every,
         min_buffer_size_to_learn=min_buffer_size_to_learn,
-        epsilon_start=1,
-        epsilon_end=0.1,
-        epsilon_decay_duration=10000,
+        epsilon_start=epsilon_start,
+        epsilon_end=epsilon_end,
+        epsilon_decay_duration=epsilon_decay_duration,
         optimizer=q_net_optimizers[player_id],
         q_network=q_networks[player_id],
         loss_str="mse",
@@ -132,7 +135,7 @@ class NFSP(rl_agent.AbstractAgent):
   # Acting
   # ---------------------------------------------------------------------------
   
-  def traverse_game(self):
+  def traverse_game(self, episode_num):
     """Traverse a complete game episode."""
     state = self._game.new_initial_state()
     while not state.is_terminal():
@@ -143,12 +146,24 @@ class NFSP(rl_agent.AbstractAgent):
       else:
         action, _ = self.step(state, state.current_player())
         state.apply_action(action)
+    
+    sl_gradients = [None for _ in range(self._num_players)]
+    br_gradients = [None for _ in range(self._num_players)]
     # final step for both players
     for player_id in range(self._num_players):
       self.step(state, player_id)
+    if episode_num % self._learn_every == 0:
+      for player_id in range(self._num_players):
+        sl_gradients, sl_loss, br_gradients, rl_loss = self.learn_br_rl(player_id)
+        self._last_sl_loss_values[player_id] = sl_loss
+        self._last_rl_loss_values[player_id] = rl_loss
+        sl_gradients[player_id] = sl_gradients
+        br_gradients[player_id] = br_gradients
+      
+    self._sample_episode_policy()
     self._prev_state = [None for _ in range(self._num_players)]
     self._prev_action = [None for _ in range(self._num_players)]
-    self._sample_episode_policy()
+    return sl_gradients, br_gradients
     
     
 
@@ -242,9 +257,6 @@ class NFSP(rl_agent.AbstractAgent):
     
     if not is_evaluation:
       self._step_counters[player_id] += 1
-      if self._step_counters[player_id] % self._learn_every == 0:
-        self.learn_br_rl(player_id)
-        
       if not state.is_terminal():
         # Store a CLONE of the current state so that subsequent in-place
         # modifications (state.apply_action) do not mutate the experience we
@@ -269,16 +281,16 @@ class NFSP(rl_agent.AbstractAgent):
         The supervised-learning loss and the RL loss obtained in this update.
     """
     # Supervised-learning (SL) update on the reservoir buffer.
-    sl_loss = self._learn(player_id)
+    sl_gradients, sl_loss = self._learn(player_id)
 
     # Reinforcement-learning (RL) update on the replay buffer of the DQN.
-    rl_loss = self._rl_agents[player_id].learn()
+    br_gradients, br_loss = self._rl_agents[player_id].learn()
 
     # Record the most recent loss values so they can be inspected/logged.
     self._last_sl_loss_values[player_id] = sl_loss
-    self._last_rl_loss_values[player_id] = rl_loss
+    self._last_rl_loss_values[player_id] = br_loss
 
-    return sl_loss, rl_loss
+    return sl_gradients, sl_loss, br_gradients, br_loss
   
   
   # ---------------------------------------------------------------------------
@@ -328,9 +340,22 @@ class NFSP(rl_agent.AbstractAgent):
     # Backward pass – we compute gradients but DO NOT apply an optimiser step.
     self._optimizers[player_id].zero_grad()
     loss_val.backward()
-    # step optimizer
-    self._optimizers[player_id].step()
-    return loss_val.item()
+
+    # Collect the gradients for each parameter of the player's average-policy
+    # network.  We copy the gradients to CPU and detach them so that they can
+    # be sent through Ray (or returned locally) without holding any graph
+    # references.  This dictates the structure expected by the Learner:
+    # {param_name (str) : grad_tensor (torch.Tensor)}
+    gradients = {}
+    for name, param in self._avg_networks[player_id].named_parameters():
+      if param.grad is not None:
+        # Clone & detach → move to CPU so it is serialisable.
+        gradients[name] = param.grad.detach().cpu().clone()
+    # Store the loss for potential debugging / logging.
+    self._last_sl_loss_values[player_id] = loss_val.item()
+    # Return both loss and gradients.  The calling code only needs the
+    # gradients, but returning the loss can be handy and is inexpensive.
+    return gradients, loss_val.item()
 
   # -------------------------------------------------
   # Checkpointing utilities – Not yet implemented 

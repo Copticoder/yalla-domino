@@ -5,7 +5,6 @@ import ray
 from typing import Dict, List
 from open_spiel.python import policy
 from open_spiel.python.algorithms import exploitability
-from MLPs import MLP
 
 
 class NFSPPolicy(policy.Policy):

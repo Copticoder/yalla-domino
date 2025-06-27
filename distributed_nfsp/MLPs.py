@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from scipy import stats
+from typing import Sequence, List
 
 class SonnetLinear(nn.Module):
   """A Sonnet linear module.
@@ -40,7 +41,7 @@ class SonnetLinear(nn.Module):
     return F.relu(y) if self._activate_relu else y
 
 
-class MLP(nn.Module):
+class BR_MLP(nn.Module):
   """A simple network built from nn.linear layers."""
 
   def __init__(self,
@@ -57,7 +58,7 @@ class MLP(nn.Module):
       activate_final: (bool) should final layer should include a ReLU
     """
 
-    super(MLP, self).__init__()
+    super(BR_MLP, self).__init__()
     self._layers = []
     # Hidden layers
     for size in hidden_sizes:
@@ -76,3 +77,20 @@ class MLP(nn.Module):
     for layer in self.model:
       x = layer(x)
     return x
+
+class AVG_MLP(nn.Module):
+  """Simple MLP identical to the one used in the DQN PyTorch agent."""
+
+  def __init__(self, in_size: int, hidden_sizes: Sequence[int], out_size: int):
+    super().__init__()
+    sizes = list(hidden_sizes) + [out_size]
+    layers: List[nn.Module] = []
+    for hs in sizes[:-1]:
+      layers.append(nn.Linear(in_size, hs))
+      layers.append(nn.ReLU())
+      in_size = hs
+    layers.append(nn.Linear(in_size, sizes[-1]))  # last layer – no activation
+    self._model = nn.Sequential(*layers)
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore
+    return self._model(x)
