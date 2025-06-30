@@ -11,15 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Training script for PyTorch NFSP agents on Kuhn Poker.
 
-This is a direct analogue of `open_spiel/python/examples/nfsp.py`, but uses the
-PyTorch implementation (`open_spiel.python.pytorch.nfsp`).
-
-Run:
-
-    python -m open_spiel.python.examples.kuhn_nfsp_pytorch --num_train_episodes=50000
-"""
 from absl import app
 from absl import flags
 import pyspiel
@@ -72,6 +64,8 @@ flags.DEFINE_string("wandb_entity", "ahmed-attia-mbzuai",
                    "WandB entity/team name for logging.")
 flags.DEFINE_boolean("enable_wandb", True,
                     "Whether to enable WandB logging.")
+flags.DEFINE_boolean("calculate_exploitability", True,
+                    "Whether to calculate exploitability and nash conv during evaluation. Set to False for large games where these metrics are computationally prohibitive.")
 
 def main(_):
   if ray.is_initialized():
@@ -107,7 +101,8 @@ def main(_):
     "eval_every": FLAGS.eval_every,
     "wandb_project": FLAGS.wandb_project,
     "wandb_entity": FLAGS.wandb_entity,
-    "enable_wandb": FLAGS.enable_wandb
+    "enable_wandb": FLAGS.enable_wandb,
+    "calculate_exploitability": FLAGS.calculate_exploitability
   }
   learner = Learner.remote(**learner_kwargs)
   

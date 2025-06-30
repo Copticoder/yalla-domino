@@ -66,11 +66,12 @@ class Learner:
       self.wandb_project = kwargs.get("wandb_project", "nfsp-training")
       self.wandb_entity = kwargs.get("wandb_entity", None)
       self.enable_wandb = kwargs.get("enable_wandb", True)
+      self.calculate_exploitability = kwargs.get("calculate_exploitability", True)
       
       # Create a dedicated evaluator actor
       self.evaluator = Evaluator.options(name="evaluator", namespace="nfsp", lifetime="detached").remote(
             self.game, self.num_players, self.num_actions,
-            self.wandb_project, self.wandb_entity, self.enable_wandb)
+            self.wandb_project, self.wandb_entity, self.enable_wandb, self.calculate_exploitability)
       self.actors = []
       
     # ---------------------------------------------------------------------------

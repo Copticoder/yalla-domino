@@ -88,7 +88,7 @@ class Evaluator:
     
     def __init__(self, game, num_players: int = 2, num_actions: int = None, 
                  wandb_project: str = "nfsp-training", wandb_entity: str = None,
-                 enable_wandb: bool = True):
+                 enable_wandb: bool = True, calculate_exploitability: bool = True):
         """Initialize the evaluator.
         
         Args:
@@ -98,11 +98,13 @@ class Evaluator:
             wandb_project: WandB project name
             wandb_entity: WandB entity/team name
             enable_wandb: Whether to enable WandB logging
+            calculate_exploitability: Whether to calculate exploitability and nash conv during evaluation
         """
         self._game = game
         self._num_players = num_players
         self._num_actions = num_actions if num_actions else game.num_distinct_actions()
         self._enable_wandb = enable_wandb
+        self._calculate_exploitability = calculate_exploitability
         
         # Initialize WandB if enabled
         if self._enable_wandb:
@@ -278,18 +280,28 @@ class Evaluator:
         )
         results['head_to_head_best_response'] = h2h_br
         
-        # Exploitability calculation
-        print("Calculating exploitability...")
-        exploitability_score = self.calculate_exploitability(avg_networks)
-        results['exploitability'] = exploitability_score
+        # Exploitability calculation (only if enabled)
+        exploitability_score = None
+        if self._calculate_exploitability:
+            print("Calculating exploitability...")
+            exploitability_score = self.calculate_exploitability(avg_networks)
+            results['exploitability'] = exploitability_score
+        else:
+            print("Skipping exploitability calculation (disabled for large games)")
+            results['exploitability'] = None
         
         # Summary metrics
-        results['summary'] = {
+        summary = {
             'avg_policy_win_rate': h2h_avg['nfsp_win_rate'],
             'br_policy_win_rate': h2h_br['nfsp_win_rate'],
-            'exploitability': exploitability_score,
-            'nash_conv': exploitability_score  # Same as exploitability
         }
+        
+        # Only add exploitability metrics if calculated
+        if self._calculate_exploitability and exploitability_score is not None:
+            summary['exploitability'] = exploitability_score
+            summary['nash_conv'] = exploitability_score  # Same as exploitability
+        
+        results['summary'] = summary
         
         # Log to WandB if enabled
         if self._enable_wandb and iteration is not None:
@@ -311,7 +323,7 @@ class Evaluator:
         # Extract metrics
         h2h_avg = results['head_to_head_average']
         h2h_br = results['head_to_head_best_response']
-        exploitability_score = results['exploitability']
+        exploitability_score = results.get('exploitability')
         
         # Prepare logging dictionary
         log_dict = {
@@ -332,11 +344,12 @@ class Evaluator:
             "eval/best_response/draws": h2h_br['draws'],
             "eval/best_response/nfsp_avg_reward": h2h_br['nfsp_avg_reward'],
             "eval/best_response/random_avg_reward": h2h_br['random_avg_reward'],
-            
-            # Exploitability metrics
-            "eval/exploitability": float(exploitability_score),
-            "eval/nash_conv": float(exploitability_score),
         }
+        
+        # Only add exploitability metrics if they were calculated
+        if exploitability_score is not None:
+            log_dict["eval/exploitability"] = float(exploitability_score)
+            log_dict["eval/nash_conv"] = float(exploitability_score)
         
         # Add training losses if provided
         if training_losses:
