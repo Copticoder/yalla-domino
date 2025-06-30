@@ -35,7 +35,7 @@ class NFSPPolicies(policy.Policy):
     # Build a full probability distribution over all legal actions.
     return {a: float(probs[a]) for a in legal_actions}
   
-@ray.remote(num_cpus=2, namespace="nfsp")
+@ray.remote(num_cpus=6, namespace="nfsp")
 class Learner:
     def __init__(self, **kwargs):
       self.game = kwargs["game"]
@@ -287,10 +287,9 @@ class Learner:
         # Send initial network parameters to actors
         self.distribute_updated_parameters()
         
-        total_iterations = self.num_iterations * self.num_actors
-        print(f"Starting training from iteration {start_iteration + 1}/{total_iterations}")
+        print(f"Starting training from iteration {start_iteration + 1}/{self.num_iterations}")
                 
-        for iteration in range(start_iteration, total_iterations):
+        for iteration in range(start_iteration, self.num_iterations):
             # ------------------------------------------------------------------
             # 1) Generate trajectories (self-play)
             # ------------------------------------------------------------------
@@ -349,8 +348,8 @@ class Learner:
                 print("----------------------------------------------------")
             
             if iteration % 1000 == 0:
-              print(f"Completed iteration {iteration + 1}/{total_iterations}")
+              print(f"Completed iteration {iteration + 1}/{self.num_iterations}")
         
         # Save final checkpoint
         print("Training completed! Saving final checkpoint...")
-        self.save_checkpoint(total_iterations)
+        self.save_checkpoint(self.num_iterations)
