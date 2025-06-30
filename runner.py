@@ -28,33 +28,33 @@ flags.DEFINE_boolean("resume_from_checkpoint", False,
 flags.DEFINE_string("checkpoint_path", None,
                     "Path to specific checkpoint file to resume from. If None, loads latest checkpoint.")
 
-flags.DEFINE_list("hidden_layers_sizes", [128,128],
+flags.DEFINE_list("hidden_layers_sizes", [1024,1024,1024],
                  "Number of hidden units in the avg-net and Q-net.")
-flags.DEFINE_integer("replay_buffer_capacity", int(2e5),
+flags.DEFINE_integer("replay_buffer_capacity", int(2e6),
                      "Size of the replay buffer.")
-flags.DEFINE_integer("reservoir_buffer_capacity", int(2e6),
+flags.DEFINE_integer("reservoir_buffer_capacity", int(20e6),
                      "Size of the reservoir buffer.")
 flags.DEFINE_float("anticipatory_param", 0.1,
                    "Probability of using the RL best response as episode policy.")
-flags.DEFINE_integer("batch_size", 256,
+flags.DEFINE_integer("batch_size", 8192,
                      "Batch size for the DQN.")
 flags.DEFINE_integer("num_actors", 16,
                      "Number of actors.")
-flags.DEFINE_integer("update_target_network_every", 1000,
+flags.DEFINE_integer("update_target_network_every", 10000,
                      "Number of steps between updating the target network.")
 flags.DEFINE_float("discount_factor", 1.0,
                    "Discount factor for the DQN.")
-flags.DEFINE_integer("min_buffer_size_to_learn", 1000,
+flags.DEFINE_integer("min_buffer_size_to_learn", 10000,
                      "Minimum buffer size to learn.")
-flags.DEFINE_float("epsilon_start", 0.08,
+flags.DEFINE_float("epsilon_start", 0.2,
                    "Starting epsilon for the epsilon-greedy policy.")
-flags.DEFINE_float("epsilon_end", 0.001,
+flags.DEFINE_float("epsilon_end", 0.02,
                    "Ending epsilon for the epsilon-greedy policy.")
-flags.DEFINE_integer("epsilon_decay_duration", int(3e6),
+flags.DEFINE_integer("epsilon_decay_duration", int(5e5),
                      "Number of steps for the epsilon-greedy policy to decay.")
-flags.DEFINE_float("learning_rate", 0.01,
+flags.DEFINE_float("learning_rate", 0.0003,
                    "Learning rate for the DQN.")
-flags.DEFINE_integer("learn_every", 64,
+flags.DEFINE_integer("learn_every", 32,
                      "Number of steps between learning updates.")
 
 # WandB configuration flags
@@ -64,14 +64,14 @@ flags.DEFINE_string("wandb_entity", "ahmed-attia-mbzuai",
                    "WandB entity/team name for logging.")
 flags.DEFINE_boolean("enable_wandb", True,
                     "Whether to enable WandB logging.")
-flags.DEFINE_boolean("calculate_exploitability", True,
+flags.DEFINE_boolean("calculate_exploitability", False,
                     "Whether to calculate exploitability and nash conv during evaluation. Set to False for large games where these metrics are computationally prohibitive.")
 
 def main(_):
   if ray.is_initialized():
     ray.shutdown()
   ray.init()
-  game = "leduc_poker"
+  game = "draw_dominoes"
 
   env = pyspiel.load_game(game)
   print(env)

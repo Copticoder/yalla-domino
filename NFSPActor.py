@@ -42,7 +42,7 @@ Transition = collections.namedtuple(
 
 MODE = enum.Enum("mode", "best_response average_policy")
 
-@ray.remote(num_cpus=1, namespace="nfsp")
+@ray.remote(num_cpus=2, namespace="nfsp")
 class NFSP(rl_agent.AbstractAgent):
   """NFSP Agent implementation in PyTorch."""
 

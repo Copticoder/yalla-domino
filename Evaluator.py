@@ -88,7 +88,8 @@ class Evaluator:
     
     def __init__(self, game, num_players: int = 2, num_actions: int = None, 
                  wandb_project: str = "nfsp-training", wandb_entity: str = None,
-                 enable_wandb: bool = True, calculate_exploitability: bool = True):
+                 enable_wandb: bool = True, calculate_exploitability: bool = True,
+                 training_config: Optional[Dict] = None):
         """Initialize the evaluator.
         
         Args:
@@ -99,6 +100,7 @@ class Evaluator:
             wandb_entity: WandB entity/team name
             enable_wandb: Whether to enable WandB logging
             calculate_exploitability: Whether to calculate exploitability and nash conv during evaluation
+            training_config: Dictionary containing training configuration parameters for wandb logging
         """
         self._game = game
         self._num_players = num_players
@@ -108,11 +110,17 @@ class Evaluator:
         
         # Initialize WandB if enabled
         if self._enable_wandb:
+            # Prepare config for wandb
+            wandb_config = training_config.copy() if training_config else {}
+            
             wandb.init(
                 project=wandb_project,
                 entity=wandb_entity,
+                config=wandb_config
             )
             print(f"WandB initialized for project: {wandb_project}")
+            if training_config:
+                print(f"Training configuration logged to WandB: {len(wandb_config)} parameters")
         
     def evaluate_head_to_head(self, 
                             q_networks: List[torch.nn.Module], 

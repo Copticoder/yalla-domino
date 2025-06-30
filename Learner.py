@@ -37,7 +37,7 @@ class NFSPPolicies(policy.Policy):
     # Build a full probability distribution over all legal actions.
     return {a: float(probs[a]) for a in legal_actions}
   
-@ray.remote(num_cpus=24, namespace="nfsp")
+@ray.remote(num_cpus=6, namespace="nfsp")
 class Learner:
     def __init__(self, **kwargs):
       self.game = kwargs["game"]
@@ -70,10 +70,14 @@ class Learner:
       self.enable_wandb = kwargs.get("enable_wandb", True)
       self.calculate_exploitability = kwargs.get("calculate_exploitability", True)
       
+      # Prepare training configuration for wandb
+      self.training_config = kwargs
+      
       # Create a dedicated evaluator actor
       self.evaluator = Evaluator.options(name="evaluator", namespace="nfsp", lifetime="detached").remote(
             self.game, self.num_players, self.num_actions,
-            self.wandb_project, self.wandb_entity, self.enable_wandb, self.calculate_exploitability)
+            self.wandb_project, self.wandb_entity, self.enable_wandb, 
+            self.calculate_exploitability, self.training_config)
       self.actors = []
       
     # ---------------------------------------------------------------------------
