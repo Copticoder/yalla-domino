@@ -42,7 +42,7 @@ Transition = collections.namedtuple(
 
 MODE = enum.Enum("mode", "best_response average_policy")
 
-@ray.remote(num_cpus=2, namespace="nfsp")
+@ray.remote(num_cpus=1, namespace="nfsp")
 class NFSP(rl_agent.AbstractAgent):
   """NFSP Agent implementation in PyTorch."""
 
@@ -110,10 +110,6 @@ class NFSP(rl_agent.AbstractAgent):
         ("q_network", self._rl_agents),
         ("avg_network", self._avg_networks),
     ]
-
-    # Initialize episode policy.
-    self._sample_episode_policy()
-    
   # ---------------------------------------------------------------------------
   # Federated Learning Methods
   # ---------------------------------------------------------------------------
@@ -159,7 +155,7 @@ class NFSP(rl_agent.AbstractAgent):
   # Acting
   # ---------------------------------------------------------------------------
   
-  def traverse_game(self, itr):
+  def traverse_game(self, itr, modes):
     """Traverse a complete game episode."""
     state = self._game.new_initial_state()
     while not state.is_terminal():
@@ -168,29 +164,15 @@ class NFSP(rl_agent.AbstractAgent):
         action = np.random.choice(legal_actions)
         state.apply_action(action)
       else:
-        action, _ = self.step(state, state.current_player())
+        action, _ = self.step(state, state.current_player(), modes[state.current_player()])
         state.apply_action(action)
     # final step for both players
     for player_id in range(self._num_players):
-      self.step(state, player_id)
+      self.step(state, player_id, modes[player_id])
     
     # Note: Removed local learning here - gradients will be computed and aggregated by learner
     self._prev_state = [None for _ in range(self._num_players)]
     self._prev_action = [None for _ in range(self._num_players)]
-    self._sample_episode_policy()
-
-  def _sample_episode_policy(self):
-    # Sample an episode policy *independently for each player* so that
-    # best-response / average-policy episodes are not perfectly
-    # synchronised across all players.  This matches the design of the
-    # reference implementation where each NFSP agent (one per player)
-    # samples its own mode.
-    self._modes = []
-    for _ in range(self._num_players):
-      if np.random.rand() < self._anticipatory_param:
-        self._modes.append(MODE.best_response)
-      else:
-        self._modes.append(MODE.average_policy)
 
   def _act(self, info_state, legal_actions, player_id):
     info_state_t = torch.Tensor(np.reshape(info_state, [1, -1]))
@@ -230,14 +212,13 @@ class NFSP(rl_agent.AbstractAgent):
   # ---------------------------------------------------------------------------
   # RL-Agent compatible interface
   # ---------------------------------------------------------------------------
-  def step(self, state, player_id, is_evaluation: bool = False):
+  def step(self, state, player_id, mode, is_evaluation: bool = False):
     """Returns the action to be taken and updates the networks if needed."""
     action = None
     probs = None
     if is_evaluation:
       mode = MODE.average_policy
-    else:
-      mode = self._modes[player_id]
+      
     if mode == MODE.best_response:
       action, probs = self._rl_agents[player_id].step(state, is_evaluation)
       if not is_evaluation and not state.is_terminal():

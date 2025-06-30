@@ -82,7 +82,7 @@ class RandomPolicy(policy.Policy):
         return {action: prob for action in legal_actions}
 
 
-@ray.remote(num_cpus=1, namespace="nfsp")
+@ray.remote(num_cpus=2, namespace="nfsp")
 class Evaluator:
     """Evaluator actor for NFSP players."""
     

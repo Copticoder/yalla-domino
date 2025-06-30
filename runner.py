@@ -38,7 +38,7 @@ flags.DEFINE_float("anticipatory_param", 0.1,
                    "Probability of using the RL best response as episode policy.")
 flags.DEFINE_integer("batch_size", 256,
                      "Batch size for the DQN.")
-flags.DEFINE_integer("num_actors", 3,
+flags.DEFINE_integer("num_actors", 16,
                      "Number of actors.")
 flags.DEFINE_integer("update_target_network_every", 1000,
                      "Number of steps between updating the target network.")
@@ -46,11 +46,11 @@ flags.DEFINE_float("discount_factor", 1.0,
                    "Discount factor for the DQN.")
 flags.DEFINE_integer("min_buffer_size_to_learn", 1000,
                      "Minimum buffer size to learn.")
-flags.DEFINE_float("epsilon_start", 0.1,
+flags.DEFINE_float("epsilon_start", 0.08,
                    "Starting epsilon for the epsilon-greedy policy.")
-flags.DEFINE_float("epsilon_end", 0.1,
+flags.DEFINE_float("epsilon_end", 0.001,
                    "Ending epsilon for the epsilon-greedy policy.")
-flags.DEFINE_integer("epsilon_decay_duration", int(1e4),
+flags.DEFINE_integer("epsilon_decay_duration", int(3e6),
                      "Number of steps for the epsilon-greedy policy to decay.")
 flags.DEFINE_float("learning_rate", 0.01,
                    "Learning rate for the DQN.")
@@ -70,10 +70,11 @@ flags.DEFINE_boolean("calculate_exploitability", True,
 def main(_):
   if ray.is_initialized():
     ray.shutdown()
-  ray.init(runtime_env={"env_vars": {"RAY_DEBUG": "1"}})
+  ray.init()
   game = "leduc_poker"
 
   env = pyspiel.load_game(game)
+  print(env)
   num_players = env.num_players()
   info_state_size = env.information_state_tensor_size()
   num_actions = env.num_distinct_actions()

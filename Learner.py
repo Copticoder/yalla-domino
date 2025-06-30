@@ -7,6 +7,8 @@ from MLPs import BR_MLP, AVG_MLP
 from open_spiel.python import policy
 # exploitability
 from open_spiel.python.algorithms import exploitability
+import numpy as np
+from NFSPActor import MODE
 class NFSPPolicies(policy.Policy):
   """Joint policy constructed from the NFSP agents for evaluation."""
 
@@ -35,7 +37,7 @@ class NFSPPolicies(policy.Policy):
     # Build a full probability distribution over all legal actions.
     return {a: float(probs[a]) for a in legal_actions}
   
-@ray.remote(num_cpus=6, namespace="nfsp")
+@ray.remote(num_cpus=24, namespace="nfsp")
 class Learner:
     def __init__(self, **kwargs):
       self.game = kwargs["game"]
@@ -138,8 +140,8 @@ class Learner:
                 self.game,
                 self.num_players,
                 self.num_actions,
-                self.replay_buffer_capacity,
-                self.reservoir_buffer_capacity,
+                self.replay_buffer_capacity//self.num_actors,
+                self.reservoir_buffer_capacity//self.num_actors,
                 self.anticipatory_param,
                 self.learning_rate,
                 self.state_representation_size,
@@ -148,7 +150,7 @@ class Learner:
                 self.epsilon_start,
                 self.epsilon_end,
                 self.epsilon_decay_duration,
-                self.batch_size,
+                self.batch_size//self.num_actors,
                 self.min_buffer_size_to_learn,
                 self.learn_every
                 )
@@ -288,12 +290,27 @@ class Learner:
         self.distribute_updated_parameters()
         
         print(f"Starting training from iteration {start_iteration + 1}/{self.num_iterations}")
-                
+        
+        def _sample_episode_policy():
+            # Sample an episode policy *independently for each player* so that
+            # best-response / average-policy episodes are not perfectly
+            # synchronised across all players.  This matches the design of the
+            # reference implementation where each NFSP agent (one per player)
+            # samples its own mode.
+            modes = []
+            for _ in range(self.num_players):
+                if np.random.rand() < self.anticipatory_param:
+                    modes.append(MODE.best_response)
+                else:
+                    modes.append(MODE.average_policy)
+            return modes
+        
         for iteration in range(start_iteration, self.num_iterations):
             # ------------------------------------------------------------------
             # 1) Generate trajectories (self-play)
             # ------------------------------------------------------------------
-            ray.get([actor.traverse_game.remote(iteration) for actor in self.actors])
+            modes = _sample_episode_policy()
+            ray.get([actor.traverse_game.remote(iteration, modes) for actor in self.actors])
             
             # ------------------------------------------------------------------
             # 2) Federated learning: collect gradients, aggregate, and distribute
