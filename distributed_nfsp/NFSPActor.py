@@ -28,6 +28,7 @@ import collections
 import enum
 import os
 from typing import List
+from MLPs import BR_MLP, AVG_MLP
 
 import numpy as np
 import torch
@@ -78,7 +79,6 @@ class NFSP(rl_agent.AbstractAgent):
     self._step_counters = [0 for _ in range(num_players)]
     
     # Create networks and optimizers locally in each actor
-    from MLPs import BR_MLP, AVG_MLP
     self._q_networks = [BR_MLP(state_representation_size, hidden_layers_sizes, num_actions) for _ in range(num_players)]
     self._avg_networks = [AVG_MLP(state_representation_size, hidden_layers_sizes, num_actions) for _ in range(num_players)]
     self._q_net_optimizers = [torch.optim.SGD(q_network.parameters(), lr=learning_rate) for q_network in self._q_networks]

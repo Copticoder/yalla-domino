@@ -73,25 +73,6 @@ flags.DEFINE_string("wandb_entity", "ahmed-attia-mbzuai",
 flags.DEFINE_boolean("enable_wandb", True,
                     "Whether to enable WandB logging.")
 
-# class NFSPPolicies(policy.Policy):
-#   """Joint policy constructed from the NFSP agents for evaluation."""
-
-#   def __init__(self, env, nfsp_actor):
-#     game = env
-#     player_ids = [0, 1]
-#     super().__init__(game, player_ids)
-#     self._actor = nfsp_actor
-    
-#   def action_probabilities(self, state):
-#     cur_player = state.current_player()
-
-#     legal_actions = state.legal_actions()
-#     # Ask the NFSP actor for an action (deterministic in evaluation mode).
-#     _, probs = self._actor.step(state, cur_player, is_evaluation=True)
-
-#     # Build a full probability distribution over all legal actions.
-#     return {a: float(probs[a]) for a in legal_actions}
-
 def main(_):
   if ray.is_initialized():
     ray.shutdown()
