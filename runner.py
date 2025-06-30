@@ -28,7 +28,7 @@ flags.DEFINE_boolean("resume_from_checkpoint", False,
 flags.DEFINE_string("checkpoint_path", None,
                     "Path to specific checkpoint file to resume from. If None, loads latest checkpoint.")
 
-flags.DEFINE_list("hidden_layers_sizes", [1024,1024,1024],
+flags.DEFINE_list("hidden_layers_sizes", [1024,1024,512],
                  "Number of hidden units in the avg-net and Q-net.")
 flags.DEFINE_integer("replay_buffer_capacity", int(2e6),
                      "Size of the replay buffer.")
@@ -54,7 +54,7 @@ flags.DEFINE_integer("epsilon_decay_duration", int(5e5),
                      "Number of steps for the epsilon-greedy policy to decay.")
 flags.DEFINE_float("learning_rate", 0.0003,
                    "Learning rate for the DQN.")
-flags.DEFINE_integer("learn_every", 32,
+flags.DEFINE_integer("learn_every", 16,
                      "Number of steps between learning updates.")
 
 # WandB configuration flags
