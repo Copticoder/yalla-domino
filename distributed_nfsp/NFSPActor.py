@@ -25,25 +25,23 @@ Usage example: see `open_spiel/python/examples/kuhn_nfsp.py` but replace the
 from __future__ import annotations
 
 import collections
-import contextlib
 import enum
 import os
-from typing import List, Sequence
+from typing import List
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch import nn
 import ray
 from open_spiel.python import rl_agent
-from dqn import DQN
+from DQN import DQN
 from open_spiel.python.utils.reservoir_buffer import ReservoirBuffer
 Transition = collections.namedtuple(
     "Transition", "info_state action_probs legal_actions_mask")
 
 MODE = enum.Enum("mode", "best_response average_policy")
 
-
+@ray.remote(num_cpus=2, namespace="nfsp")
 class NFSP(rl_agent.AbstractAgent):
   """NFSP Agent implementation in PyTorch."""
 
@@ -55,10 +53,9 @@ class NFSP(rl_agent.AbstractAgent):
       replay_buffer_capacity: int,
       reservoir_buffer_capacity: int,
       anticipatory_param: float,
-      avg_net_optimizers: List[torch.optim.Optimizer],
-      avg_networks: List[torch.nn.Module],
-      q_net_optimizers: List[torch.optim.Optimizer],
-      q_networks: List[torch.nn.Module],
+      learning_rate: float,
+      state_representation_size: int,
+      hidden_layers_sizes: List[int],
       update_target_network_every: int = 1000,
       epsilon_start: float = 0.08,
       epsilon_end: float = 0.001,
@@ -79,6 +76,14 @@ class NFSP(rl_agent.AbstractAgent):
     self._prev_action = [None for _ in range(num_players)]
     # Step counter to keep track of learning.
     self._step_counters = [0 for _ in range(num_players)]
+    
+    # Create networks and optimizers locally in each actor
+    from MLPs import BR_MLP, AVG_MLP
+    self._q_networks = [BR_MLP(state_representation_size, hidden_layers_sizes, num_actions) for _ in range(num_players)]
+    self._avg_networks = [AVG_MLP(state_representation_size, hidden_layers_sizes, num_actions) for _ in range(num_players)]
+    self._q_net_optimizers = [torch.optim.SGD(q_network.parameters(), lr=learning_rate) for q_network in self._q_networks]
+    self._avg_net_optimizers = [torch.optim.SGD(avg_network.parameters(), lr=learning_rate) for avg_network in self._avg_networks]
+    
     self._rl_agents = [DQN(
         player_id=player_id,
         num_actions=num_actions,
@@ -89,8 +94,8 @@ class NFSP(rl_agent.AbstractAgent):
         epsilon_start=epsilon_start,
         epsilon_end=epsilon_end,
         epsilon_decay_duration=epsilon_decay_duration,
-        optimizer=q_net_optimizers[player_id],
-        q_network=q_networks[player_id],
+        optimizer=self._q_net_optimizers[player_id],
+        q_network=self._q_networks[player_id],
         loss_str="mse",
     ) for player_id in range(num_players)]
 
@@ -98,11 +103,8 @@ class NFSP(rl_agent.AbstractAgent):
     self._last_rl_loss_values = [None for _ in range(num_players)]
     self._last_sl_loss_values = [None for _ in range(num_players)]
 
-    # Average policy network.
-    self._avg_networks = avg_networks
-
     # Optimizer for supervised learning (SL) network.
-    self._optimizers = avg_net_optimizers
+    self._optimizers = self._avg_net_optimizers
 
     self._savers = [
         ("q_network", self._rl_agents),
@@ -112,29 +114,52 @@ class NFSP(rl_agent.AbstractAgent):
     # Initialize episode policy.
     self._sample_episode_policy()
     
-  def update_networks(self, q_networks, avg_networks, q_net_optimizers, avg_net_optimizers):
-    """Update the networks and optimizers with new parameters.
+  # ---------------------------------------------------------------------------
+  # Federated Learning Methods
+  # ---------------------------------------------------------------------------
+  
+  def update_networks(self, q_network_params, avg_network_params):
+    """Update the networks with new parameters from the learner.
     
     Args:
-      q_networks: List of state dictionaries for Q-networks
-      avg_networks: List of state dictionaries for average policy networks  
-      q_net_optimizers: List of state dictionaries for Q-network optimizers
-      avg_net_optimizers: List of state dictionaries for average policy optimizers
+      q_network_params: List of state dictionaries for Q-networks
+      avg_network_params: List of state dictionaries for average policy networks
     """
-    for i in range(self._num_players):
-      # Load Q-network parameters
-      self._rl_agents[i]._q_network.load_state_dict(q_networks[i])
-      # Load average policy network parameters
-      self._avg_networks[i].load_state_dict(avg_networks[i])
-      # Load optimizer states
-      self._rl_agents[i]._optimizer.load_state_dict(q_net_optimizers[i])
-      self._optimizers[i].load_state_dict(avg_net_optimizers[i])
+    for player_id in range(self._num_players):
+      # Update Q-network parameters
+      self._q_networks[player_id].load_state_dict(q_network_params[player_id])
+      self._rl_agents[player_id]._q_network.load_state_dict(q_network_params[player_id])
+      
+      # Update average policy network parameters
+      self._avg_networks[player_id].load_state_dict(avg_network_params[player_id])
+      
+      # Update target Q-network parameters for DQN
+      self._rl_agents[player_id]._target_q_network.load_state_dict(q_network_params[player_id])
   
+  def compute_gradients(self, player_id):
+    """Compute gradients for both average policy and Q-networks for a specific player.
+    
+    Args:
+      player_id: Player ID to compute gradients for
+      
+    Returns:
+      Tuple of (avg_policy_gradients, q_network_gradients, sl_loss, rl_loss)
+    """
+    # Compute supervised learning (average policy) gradients
+    avg_gradients, sl_loss = self._learn(player_id, return_gradients=True)
+    
+    # Compute reinforcement learning (Q-network) gradients  
+    q_gradients, rl_loss = self._rl_agents[player_id].learn(return_gradients=True)
+    # save losses 
+    self._last_rl_loss_values[player_id] = rl_loss
+    self._last_sl_loss_values[player_id] = sl_loss
+    return avg_gradients, q_gradients, sl_loss, rl_loss
+    
   # ---------------------------------------------------------------------------
   # Acting
   # ---------------------------------------------------------------------------
   
-  def traverse_game(self, episode_num):
+  def traverse_game(self, itr):
     """Traverse a complete game episode."""
     state = self._game.new_initial_state()
     while not state.is_terminal():
@@ -145,26 +170,14 @@ class NFSP(rl_agent.AbstractAgent):
       else:
         action, _ = self.step(state, state.current_player())
         state.apply_action(action)
-    
-    sl_gradients = [None for _ in range(self._num_players)]
-    br_gradients = [None for _ in range(self._num_players)]
     # final step for both players
     for player_id in range(self._num_players):
       self.step(state, player_id)
-    if episode_num % self._learn_every == 0:
-      for player_id in range(self._num_players):
-        sl_gradient, sl_loss, br_gradient, rl_loss = self.learn_br_rl(player_id)
-        self._last_sl_loss_values[player_id] = sl_loss
-        self._last_rl_loss_values[player_id] = rl_loss
-        sl_gradients[player_id] = sl_gradient
-        br_gradients[player_id] = br_gradient
-      
-    self._sample_episode_policy()
+    
+    # Note: Removed local learning here - gradients will be computed and aggregated by learner
     self._prev_state = [None for _ in range(self._num_players)]
     self._prev_action = [None for _ in range(self._num_players)]
-    return sl_gradients, br_gradients
-    
-    
+    self._sample_episode_policy()
 
   def _sample_episode_policy(self):
     # Sample an episode policy *independently for each player* so that
@@ -255,7 +268,6 @@ class NFSP(rl_agent.AbstractAgent):
       raise ValueError(f"Invalid mode ({mode})")
     
     if not is_evaluation:
-      self._step_counters[player_id] += 1
       if not state.is_terminal():
         # Store a CLONE of the current state so that subsequent in-place
         # modifications (state.apply_action) do not mutate the experience we
@@ -279,17 +291,21 @@ class NFSP(rl_agent.AbstractAgent):
     Tuple[Optional[float], Optional[float]]
         The supervised-learning loss and the RL loss obtained in this update.
     """
+    # Debug: Check buffer sizes
+    reservoir_size = len(self._reservoir_buffers[player_id])
+    replay_buffer_size = len(self._rl_agents[player_id].replay_buffer)
+    
     # Supervised-learning (SL) update on the reservoir buffer.
-    sl_gradients, sl_loss = self._learn(player_id)
+    sl_loss = self._learn(player_id)
 
     # Reinforcement-learning (RL) update on the replay buffer of the DQN.
-    br_gradients, br_loss = self._rl_agents[player_id].learn()
+    rl_loss = self._rl_agents[player_id].learn()
 
     # Record the most recent loss values so they can be inspected/logged.
     self._last_sl_loss_values[player_id] = sl_loss
-    self._last_rl_loss_values[player_id] = br_loss
+    self._last_rl_loss_values[player_id] = rl_loss
 
-    return sl_gradients, sl_loss, br_gradients, br_loss
+    return sl_loss, rl_loss
   
   
   # ---------------------------------------------------------------------------
@@ -314,14 +330,17 @@ class NFSP(rl_agent.AbstractAgent):
     loss = -torch.sum(target_action_probs * log_probs) / logits.shape[0]
     return loss
 
-  def _learn(self, player_id):
+  def _learn(self, player_id, return_gradients=False):
     """Samples from reservoir buffer, performs a backward pass and
-    returns the loss together with the gradients (no optimiser step)."""
+    optionally returns gradients or applies optimizer step."""
     # Exit early if there is not enough data to learn from.
     if len(self._reservoir_buffers[player_id]) < max(
         self._batch_size, self._min_buffer_size_to_learn
     ):
-      return None, None
+      if return_gradients:
+        return None, None
+      else:
+        return None
 
     # Sample a batch from the reservoir buffer.
     transitions = self._reservoir_buffers[player_id].sample(self._batch_size)
@@ -332,29 +351,36 @@ class NFSP(rl_agent.AbstractAgent):
     info_states = torch.from_numpy(info_states_np)
     action_probs = torch.from_numpy(action_probs_np)
 
+    # Debug: Get network params before update
+    if hasattr(self, '_debug_param_count'):
+        self._debug_param_count += 1
+    else:
+        self._debug_param_count = 1
+    
+    param_before = None
+    if self._debug_param_count % 1000 == 0:  # Check every 1000 updates
+        param_before = list(self._avg_networks[player_id].parameters())[0].clone()
+
     # Forward pass & loss computation.
     logits = self._avg_networks[player_id](info_states)
     loss_val = self._loss_avg(logits, action_probs)
 
-    # Backward pass – we compute gradients but DO NOT apply an optimiser step.
+    # Backward pass – compute gradients
     self._optimizers[player_id].zero_grad()
     loss_val.backward()
-
-    # Collect the gradients for each parameter of the player's average-policy
-    # network.  We copy the gradients to CPU and detach them so that they can
-    # be sent through Ray (or returned locally) without holding any graph
-    # references.  This dictates the structure expected by the Learner:
-    # {param_name (str) : grad_tensor (torch.Tensor)}
-    gradients = {}
-    for name, param in self._avg_networks[player_id].named_parameters():
-      if param.grad is not None:
-        # Clone & detach → move to CPU so it is serialisable.
-        gradients[name] = param.grad.detach().cpu().clone()
-    # Store the loss for potential debugging / logging.
-    self._last_sl_loss_values[player_id] = loss_val.item()
-    # Return both loss and gradients.  The calling code only needs the
-    # gradients, but returning the loss can be handy and is inexpensive.
-    return gradients, loss_val.item()
+    
+    if return_gradients:
+        # Extract gradients
+        gradients = {}
+        for name, param in self._avg_networks[player_id].named_parameters():
+          if param.grad is not None:
+            gradients[name] = param.grad.clone()
+        return gradients, loss_val.item()
+    else:
+        # Apply optimizer step
+        self._optimizers[player_id].step()
+        
+        return loss_val.item()
 
   # -------------------------------------------------
   # Checkpointing utilities – Not yet implemented 

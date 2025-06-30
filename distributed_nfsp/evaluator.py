@@ -2,7 +2,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import ray
-from typing import Dict, List
+import wandb
+from typing import Dict, List, Optional
 from open_spiel.python import policy
 from open_spiel.python.algorithms import exploitability
 
@@ -85,17 +86,31 @@ class RandomPolicy(policy.Policy):
 class Evaluator:
     """Evaluator actor for NFSP players."""
     
-    def __init__(self, game, num_players: int = 2, num_actions: int = None):
+    def __init__(self, game, num_players: int = 2, num_actions: int = None, 
+                 wandb_project: str = "nfsp-training", wandb_entity: str = None,
+                 enable_wandb: bool = True):
         """Initialize the evaluator.
         
         Args:
             game: OpenSpiel game instance
             num_players: Number of players (default 2)
             num_actions: Number of possible actions
+            wandb_project: WandB project name
+            wandb_entity: WandB entity/team name
+            enable_wandb: Whether to enable WandB logging
         """
         self._game = game
         self._num_players = num_players
         self._num_actions = num_actions if num_actions else game.num_distinct_actions()
+        self._enable_wandb = enable_wandb
+        
+        # Initialize WandB if enabled
+        if self._enable_wandb:
+            wandb.init(
+                project=wandb_project,
+                entity=wandb_entity,
+            )
+            print(f"WandB initialized for project: {wandb_project}")
         
     def evaluate_head_to_head(self, 
                             q_networks: List[torch.nn.Module], 
@@ -232,13 +247,17 @@ class Evaluator:
     def comprehensive_evaluation(self, 
                                q_networks: List[torch.nn.Module],
                                avg_networks: List[torch.nn.Module],
-                               num_head_to_head_episodes: int = 1000) -> Dict[str, any]:
+                               num_head_to_head_episodes: int = 1000,
+                               iteration: Optional[int] = None,
+                               training_losses: Optional[Dict] = None) -> Dict[str, any]:
         """Run comprehensive evaluation including both head-to-head and exploitability.
         
         Args:
             q_networks: List of Q-networks for each player
             avg_networks: List of average policy networks for each player
             num_head_to_head_episodes: Number of episodes for head-to-head evaluation
+            iteration: Current training iteration for logging
+            training_losses: Dictionary of training losses for each player
             
         Returns:
             Dictionary with all evaluation metrics
@@ -272,37 +291,62 @@ class Evaluator:
             'nash_conv': exploitability_score  # Same as exploitability
         }
         
+        # Log to WandB if enabled
+        if self._enable_wandb and iteration is not None:
+            self._log_to_wandb(results, iteration, training_losses)
+        
         return results
     
-    def update_networks(self, 
-                       q_networks_state_dicts: List[Dict], 
-                       avg_networks_state_dicts: List[Dict],
-                       hidden_layers_sizes: List[int],
-                       state_representation_size: int):
-        """Update evaluator with new network parameters from parameter server.
+    def _log_to_wandb(self, results: Dict, iteration: int, training_losses: Optional[Dict] = None):
+        """Log evaluation results to WandB.
         
         Args:
-            q_networks_state_dicts: State dictionaries for Q-networks
-            avg_networks_state_dicts: State dictionaries for average networks
-            hidden_layers_sizes: Hidden layer sizes for network reconstruction
-            state_representation_size: Input size for networks
+            results: Evaluation results dictionary
+            iteration: Current training iteration
+            training_losses: Optional training losses to log
         """
-        # Recreate networks with the provided state dictionaries
-        self._q_networks = []
-        self._avg_networks = []
-        
-        for player_id in range(self._num_players):
-            # Create Q-network and load state
-            q_net = MLP(state_representation_size, hidden_layers_sizes, self._num_actions)
-            q_net.load_state_dict(q_networks_state_dicts[player_id])
-            q_net.eval()  # Set to evaluation mode
-            self._q_networks.append(q_net)
+        if not self._enable_wandb:
+            return
             
-            # Create average network and load state
-            avg_net = MLP(state_representation_size, hidden_layers_sizes, self._num_actions)
-            avg_net.load_state_dict(avg_networks_state_dicts[player_id])
-            avg_net.eval()  # Set to evaluation mode
-            self._avg_networks.append(avg_net)
+        # Extract metrics
+        h2h_avg = results['head_to_head_average']
+        h2h_br = results['head_to_head_best_response']
+        exploitability_score = results['exploitability']
+        
+        # Prepare logging dictionary
+        log_dict = {
+            "iteration": iteration,
+            
+            # Average policy head-to-head metrics
+            "eval/avg_policy/win_rate": h2h_avg['nfsp_win_rate'],
+            "eval/avg_policy/nfsp_wins": h2h_avg['nfsp_wins'],
+            "eval/avg_policy/random_wins": h2h_avg['random_wins'],
+            "eval/avg_policy/draws": h2h_avg['draws'],
+            "eval/avg_policy/nfsp_avg_reward": h2h_avg['nfsp_avg_reward'],
+            "eval/avg_policy/random_avg_reward": h2h_avg['random_avg_reward'],
+            
+            # Best response head-to-head metrics
+            "eval/best_response/win_rate": h2h_br['nfsp_win_rate'],
+            "eval/best_response/nfsp_wins": h2h_br['nfsp_wins'],
+            "eval/best_response/random_wins": h2h_br['random_wins'],
+            "eval/best_response/draws": h2h_br['draws'],
+            "eval/best_response/nfsp_avg_reward": h2h_br['nfsp_avg_reward'],
+            "eval/best_response/random_avg_reward": h2h_br['random_avg_reward'],
+            
+            # Exploitability metrics
+            "eval/exploitability": float(exploitability_score),
+            "eval/nash_conv": float(exploitability_score),
+        }
+        
+        # Add training losses if provided
+        if training_losses:
+            for player_id, (sl_loss, rl_loss) in training_losses.items():
+                log_dict[f"train/player_{player_id}/supervised_loss"] = sl_loss
+                log_dict[f"train/player_{player_id}/rl_loss"] = rl_loss
+        
+        # Log to WandB
+        wandb.log(log_dict, step=iteration)
+        print(f"Logged evaluation metrics to WandB for iteration {iteration}")
 
 
 class JointPolicy(policy.Policy):

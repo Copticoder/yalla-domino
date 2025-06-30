@@ -183,9 +183,10 @@ class DQN(rl_agent.AbstractAgent):
         (1 - decay_steps / self._epsilon_decay_duration)**power)
     return decayed_epsilon
 
-  def learn(self):
+  def learn(self, return_gradients=False):
     """Samples a batch, performs one gradient update of the Q-network
-    and returns both the gradients and the scalar loss.
+    and returns the scalar loss. If return_gradients=True, returns gradients
+    instead of applying optimizer step.
 
     If there are not enough elements in the replay buffer, the function
     exits early and returns ``None``.
@@ -198,7 +199,10 @@ class DQN(rl_agent.AbstractAgent):
         len(self._replay_buffer) < self._batch_size
         or len(self._replay_buffer) < self._min_buffer_size_to_learn
     ):
-      return None, None
+      if return_gradients:
+        return None, None
+      else:
+        return None
 
     # -----------------------------------------------------------------------
     # Sample a mini-batch of transitions.
@@ -235,14 +239,19 @@ class DQN(rl_agent.AbstractAgent):
 
     self._optimizer.zero_grad()
     loss.backward()
-    # Keep the most recent loss value (scalar) for external access.
-    self._last_loss_value = loss.item()
-    gradients = {}
-    for name, param in self._q_network.named_parameters():
-      if param.grad is not None:
-        # Clone & detach → move to CPU so it is serialisable.
-        gradients[name] = param.grad.detach().cpu().clone()
-    return gradients, self._last_loss_value
+    
+    if return_gradients:
+        # Extract gradients
+        gradients = {}
+        for name, param in self._q_network.named_parameters():
+          if param.grad is not None:
+            gradients[name] = param.grad.clone()
+        return gradients, loss.item()
+    else:
+        # Apply optimizer step
+        self._optimizer.step()
+        self._last_loss_value = loss.item()
+        return self._last_loss_value
 
   @property
   def q_values(self):

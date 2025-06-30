@@ -22,28 +22,20 @@ Run:
 """
 from absl import app
 from absl import flags
-from absl import logging
-from open_spiel.python import policy
-from open_spiel.python import rl_environment
-from open_spiel.python.algorithms import exploitability
-import torch
 import pyspiel
-from torch import nn
-import torch.nn.functional as F
-import math
-from typing import Sequence, List
-from open_spiel.python.pytorch import nfsp
-from scipy import stats
-import NFSPActor
-from MLPs import BR_MLP, AVG_MLP
 from Learner import Learner
 import ray
 FLAGS = flags.FLAGS
 
-flags.DEFINE_integer("num_train_episodes", int(3e6),
-                     "Number of training episodes.")
+flags.DEFINE_integer("num_iterations", int(7e6),
+                     "Number of training iterations.")
 flags.DEFINE_integer("eval_every", 10000,
                      "Episode frequency at which the agents are evaluated.")
+flags.DEFINE_boolean("resume_from_checkpoint", False,
+                     "Whether to resume training from a checkpoint.")
+flags.DEFINE_string("checkpoint_path", None,
+                    "Path to specific checkpoint file to resume from. If None, loads latest checkpoint.")
+
 flags.DEFINE_list("hidden_layers_sizes", [128,128],
                  "Number of hidden units in the avg-net and Q-net.")
 flags.DEFINE_integer("replay_buffer_capacity", int(2e5),
@@ -52,26 +44,34 @@ flags.DEFINE_integer("reservoir_buffer_capacity", int(2e6),
                      "Size of the reservoir buffer.")
 flags.DEFINE_float("anticipatory_param", 0.1,
                    "Probability of using the RL best response as episode policy.")
-flags.DEFINE_integer("batch_size", 512,
+flags.DEFINE_integer("batch_size", 256,
                      "Batch size for the DQN.")
-flags.DEFINE_integer("num_actors", 1,
+flags.DEFINE_integer("num_actors", 3,
                      "Number of actors.")
 flags.DEFINE_integer("update_target_network_every", 1000,
                      "Number of steps between updating the target network.")
 flags.DEFINE_float("discount_factor", 1.0,
                    "Discount factor for the DQN.")
-flags.DEFINE_integer("min_buffer_size_to_learn", 512,
+flags.DEFINE_integer("min_buffer_size_to_learn", 1000,
                      "Minimum buffer size to learn.")
-flags.DEFINE_float("epsilon_start", 0.08,
+flags.DEFINE_float("epsilon_start", 0.1,
                    "Starting epsilon for the epsilon-greedy policy.")
-flags.DEFINE_float("epsilon_end", 0.001,
+flags.DEFINE_float("epsilon_end", 0.1,
                    "Ending epsilon for the epsilon-greedy policy.")
-flags.DEFINE_integer("epsilon_decay_duration", int(1e6),
+flags.DEFINE_integer("epsilon_decay_duration", int(1e4),
                      "Number of steps for the epsilon-greedy policy to decay.")
 flags.DEFINE_float("learning_rate", 0.01,
                    "Learning rate for the DQN.")
 flags.DEFINE_integer("learn_every", 64,
                      "Number of steps between learning updates.")
+
+# WandB configuration flags
+flags.DEFINE_string("wandb_project", "nfsp-training",
+                   "WandB project name for logging.")
+flags.DEFINE_string("wandb_entity", "ahmed-attia-mbzuai",
+                   "WandB entity/team name for logging.")
+flags.DEFINE_boolean("enable_wandb", True,
+                    "Whether to enable WandB logging.")
 
 # class NFSPPolicies(policy.Policy):
 #   """Joint policy constructed from the NFSP agents for evaluation."""
@@ -122,11 +122,25 @@ def main(_):
     "learning_rate": FLAGS.learning_rate,
     "anticipatory_param": FLAGS.anticipatory_param,
     "num_actors": FLAGS.num_actors,
-    "num_train_episodes": FLAGS.num_train_episodes,
-    "eval_every": FLAGS.eval_every
+    "num_iterations": FLAGS.num_iterations,
+    "eval_every": FLAGS.eval_every,
+    "wandb_project": FLAGS.wandb_project,
+    "wandb_entity": FLAGS.wandb_entity,
+    "enable_wandb": FLAGS.enable_wandb
   }
   learner = Learner.remote(**learner_kwargs)
-  ray.get(learner.start.remote())
+  
+  # Start training with checkpoint support
+  print(f"Starting training for {FLAGS.num_iterations} iterations...")
+  if FLAGS.resume_from_checkpoint:
+    print("Resuming from checkpoint...")
+    ray.get(learner.start.remote(resume_from_checkpoint=True, checkpoint_path=FLAGS.checkpoint_path))
+  else:
+    print("Starting fresh training...")
+    ray.get(learner.start.remote())
+  
+  print("Training completed!")
+  ray.shutdown()
 
 if __name__ == "__main__":
   app.run(main) 
