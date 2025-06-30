@@ -291,10 +291,6 @@ class NFSP(rl_agent.AbstractAgent):
     Tuple[Optional[float], Optional[float]]
         The supervised-learning loss and the RL loss obtained in this update.
     """
-    # Debug: Check buffer sizes
-    reservoir_size = len(self._reservoir_buffers[player_id])
-    replay_buffer_size = len(self._rl_agents[player_id].replay_buffer)
-    
     # Supervised-learning (SL) update on the reservoir buffer.
     sl_loss = self._learn(player_id)
 

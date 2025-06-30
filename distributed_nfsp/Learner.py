@@ -319,7 +319,7 @@ class Learner:
             # ------------------------------------------------------------------
             # 4) Periodic evaluation 
             # ------------------------------------------------------------------
-            if (iteration + 1) % self.eval_every == 0:
+            if iteration % self.eval_every == 0:
                 # Get training losses first
                 loss_refs = [
                   actor.get_loss.remote(player)

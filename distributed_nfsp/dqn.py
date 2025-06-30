@@ -15,10 +15,8 @@
 """DQN agent implemented in PyTorch."""
 
 import collections
-import math
 import copy
 import numpy as np
-from scipy import stats
 import torch
 from torch import nn
 import torch.nn.functional as F
