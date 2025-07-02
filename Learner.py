@@ -24,16 +24,7 @@ class NFSPPolicies(policy.Policy):
     legal_actions = state.legal_actions()
     # Ask the NFSP actor for an action (deterministic in evaluation mode).
     _, probs = ray.get(self._actor.step.remote(state, cur_player, is_evaluation=True))
-
-    # Debug: Print action probabilities for the first few evaluations
-    if hasattr(self, '_debug_count'):
-        self._debug_count += 1
-    else:
-        self._debug_count = 1
     
-    if self._debug_count <= 5:  # Only print for first few calls
-        print(f"Debug - State: {state}, Player: {cur_player}, Action probs: {probs}")
-
     # Build a full probability distribution over all legal actions.
     return {a: float(probs[a]) for a in legal_actions}
   
@@ -334,7 +325,7 @@ class Learner:
             # ------------------------------------------------------------------
             # 3) Checkpointing every 100,000 iterations
             # ------------------------------------------------------------------
-            if iteration % 100000 == 0:
+            if iteration % 10000 == 0:
                 self.save_checkpoint(iteration)
     
             # ------------------------------------------------------------------
@@ -360,7 +351,7 @@ class Learner:
                     self.q_networks,
                     self.avg_networks,
                     num_head_to_head_episodes=1000,
-                    iteration=iteration+1,
+                    iteration=iteration,
                     training_losses=training_losses
                 )
                 eval_results = ray.get(eval_ref)

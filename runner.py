@@ -1,16 +1,3 @@
-# Copyright 2024
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 from absl import app
 from absl import flags
@@ -30,15 +17,15 @@ flags.DEFINE_string("checkpoint_path", None,
 
 flags.DEFINE_list("hidden_layers_sizes", [1024,1024,512],
                  "Number of hidden units in the avg-net and Q-net.")
-flags.DEFINE_integer("replay_buffer_capacity", int(2e6),
+flags.DEFINE_integer("replay_buffer_capacity", int(7e5),
                      "Size of the replay buffer.")
-flags.DEFINE_integer("reservoir_buffer_capacity", int(20e6),
+flags.DEFINE_integer("reservoir_buffer_capacity", int(7e5),
                      "Size of the reservoir buffer.")
 flags.DEFINE_float("anticipatory_param", 0.1,
                    "Probability of using the RL best response as episode policy.")
 flags.DEFINE_integer("batch_size", 8192,
                      "Batch size for the DQN.")
-flags.DEFINE_integer("num_actors", 16,
+flags.DEFINE_integer("num_actors", 24,
                      "Number of actors.")
 flags.DEFINE_integer("update_target_network_every", 10000,
                      "Number of steps between updating the target network.")
@@ -54,7 +41,7 @@ flags.DEFINE_integer("epsilon_decay_duration", int(5e5),
                      "Number of steps for the epsilon-greedy policy to decay.")
 flags.DEFINE_float("learning_rate", 0.0003,
                    "Learning rate for the DQN.")
-flags.DEFINE_integer("learn_every", 16,
+flags.DEFINE_integer("learn_every", 8,
                      "Number of steps between learning updates.")
 
 # WandB configuration flags
@@ -70,7 +57,11 @@ flags.DEFINE_boolean("calculate_exploitability", False,
 def main(_):
   if ray.is_initialized():
     ray.shutdown()
-  ray.init()
+  # Configure Ray with reduced object store memory
+  ray.init(
+    object_store_memory=10 * 1024**3,  # 10GB for object store (reduced from ~32GB)
+    # This leaves more memory available for actor processes and computations
+  )
   game = "draw_dominoes"
 
   env = pyspiel.load_game(game)
