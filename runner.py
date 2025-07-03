@@ -69,7 +69,6 @@ def main(_):
   game = "draw_dominoes"
 
   env = pyspiel.load_game(game)
-  print(env)
   num_players = env.num_players()
   info_state_size = env.information_state_tensor_size()
   num_actions = env.num_distinct_actions()
