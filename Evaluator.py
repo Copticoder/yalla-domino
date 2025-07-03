@@ -82,14 +82,15 @@ class RandomPolicy(policy.Policy):
         return {action: prob for action in legal_actions}
 
 
-@ray.remote(num_cpus=2, namespace="nfsp")
+@ray.remote(num_cpus=6, namespace="nfsp")
 class Evaluator:
     """Evaluator actor for NFSP players."""
     
     def __init__(self, game, num_players: int = 2, num_actions: int = None, 
                  wandb_project: str = "nfsp-training", wandb_entity: str = None,
                  enable_wandb: bool = True, calculate_exploitability: bool = True,
-                 training_config: Optional[Dict] = None):
+                 training_config: Optional[Dict] = None,
+                 wandb_run_id: str = None, wandb_resume: bool = False):
         """Initialize the evaluator.
         
         Args:
@@ -101,11 +102,15 @@ class Evaluator:
             enable_wandb: Whether to enable WandB logging
             calculate_exploitability: Whether to calculate exploitability and nash conv during evaluation
             training_config: Dictionary containing training configuration parameters for wandb logging
+            wandb_run_id: Optional WandB run ID for resuming runs
+            wandb_resume: Whether to resume an existing WandB run
         """
         self._game = game
         self._num_players = num_players
         self._num_actions = num_actions if num_actions else game.num_distinct_actions()
         self._enable_wandb = enable_wandb
+        self._wandb_run_id = wandb_run_id
+        self._wandb_resume = wandb_resume
         self._calculate_exploitability = calculate_exploitability
         
         # Initialize WandB if enabled
@@ -113,12 +118,22 @@ class Evaluator:
             # Prepare config for wandb
             wandb_config = training_config.copy() if training_config else {}
             
-            wandb.init(
-                project=wandb_project,
-                entity=wandb_entity,
-                config=wandb_config
-            )
+            # Build init kwargs to allow optional resuming
+            init_kwargs = {
+                "project": wandb_project,
+                "entity": wandb_entity,
+                "config": wandb_config,
+            }
+            if self._wandb_run_id is not None:
+                init_kwargs["id"] = self._wandb_run_id
+            if self._wandb_resume:
+                # 'allow' will resume the run if it exists, otherwise create new
+                init_kwargs["resume"] = "allow"
+
+            wandb.init(**init_kwargs)
             print(f"WandB initialized for project: {wandb_project}")
+            if self._wandb_run_id:
+                print(f"WandB run ID: {self._wandb_run_id}")
             if training_config:
                 print(f"Training configuration logged to WandB: {len(wandb_config)} parameters")
         

@@ -327,17 +327,7 @@ class NFSP(rl_agent.AbstractAgent):
     action_probs_np = np.asarray([t.action_probs for t in transitions], dtype=np.float32)
     info_states = torch.from_numpy(info_states_np)
     action_probs = torch.from_numpy(action_probs_np)
-
-    # Debug: Get network params before update
-    if hasattr(self, '_debug_param_count'):
-        self._debug_param_count += 1
-    else:
-        self._debug_param_count = 1
     
-    param_before = None
-    if self._debug_param_count % 1000 == 0:  # Check every 1000 updates
-        param_before = list(self._avg_networks[player_id].parameters())[0].clone()
-
     # Forward pass & loss computation.
     logits = self._avg_networks[player_id](info_states)
     loss_val = self._loss_avg(logits, action_probs)

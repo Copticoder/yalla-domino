@@ -1,4 +1,3 @@
-
 from absl import app
 from absl import flags
 import pyspiel
@@ -10,16 +9,16 @@ flags.DEFINE_integer("num_iterations", int(7e6),
                      "Number of training iterations.")
 flags.DEFINE_integer("eval_every", 10000,
                      "Episode frequency at which the agents are evaluated.")
-flags.DEFINE_boolean("resume_from_checkpoint", False,
+flags.DEFINE_boolean("resume_from_checkpoint", True,
                      "Whether to resume training from a checkpoint.")
-flags.DEFINE_string("checkpoint_path", None,
+flags.DEFINE_string("checkpoint_path", "/home/ahmed_emad_gm/yalla-domino/checkpoints/checkpoint_iter_780000.pkl",
                     "Path to specific checkpoint file to resume from. If None, loads latest checkpoint.")
 
 flags.DEFINE_list("hidden_layers_sizes", [1024,1024,512],
                  "Number of hidden units in the avg-net and Q-net.")
-flags.DEFINE_integer("replay_buffer_capacity", int(7e5),
+flags.DEFINE_integer("replay_buffer_capacity", int(5e6),
                      "Size of the replay buffer.")
-flags.DEFINE_integer("reservoir_buffer_capacity", int(7e5),
+flags.DEFINE_integer("reservoir_buffer_capacity", int(5e6),
                      "Size of the reservoir buffer.")
 flags.DEFINE_float("anticipatory_param", 0.1,
                    "Probability of using the RL best response as episode policy.")
@@ -33,11 +32,11 @@ flags.DEFINE_float("discount_factor", 1.0,
                    "Discount factor for the DQN.")
 flags.DEFINE_integer("min_buffer_size_to_learn", 10000,
                      "Minimum buffer size to learn.")
-flags.DEFINE_float("epsilon_start", 0.2,
+flags.DEFINE_float("epsilon_start", 0.3,
                    "Starting epsilon for the epsilon-greedy policy.")
 flags.DEFINE_float("epsilon_end", 0.02,
                    "Ending epsilon for the epsilon-greedy policy.")
-flags.DEFINE_integer("epsilon_decay_duration", int(5e5),
+flags.DEFINE_integer("epsilon_decay_duration", int(2e6),
                      "Number of steps for the epsilon-greedy policy to decay.")
 flags.DEFINE_float("learning_rate", 0.0003,
                    "Learning rate for the DQN.")
@@ -49,8 +48,13 @@ flags.DEFINE_string("wandb_project", "nfsp-training",
                    "WandB project name for logging.")
 flags.DEFINE_string("wandb_entity", "ahmed-attia-mbzuai",
                    "WandB entity/team name for logging.")
+
 flags.DEFINE_boolean("enable_wandb", True,
                     "Whether to enable WandB logging.")
+flags.DEFINE_string("wandb_run_id", "u8uxrzbs",
+                   "WandB run ID to resume logging to. If None, a new run is created.")
+flags.DEFINE_boolean("wandb_resume", True,
+                    "Whether to resume the specified WandB run if it exists.")
 flags.DEFINE_boolean("calculate_exploitability", False,
                     "Whether to calculate exploitability and nash conv during evaluation. Set to False for large games where these metrics are computationally prohibitive.")
 
@@ -59,7 +63,7 @@ def main(_):
     ray.shutdown()
   # Configure Ray with reduced object store memory
   ray.init(
-    object_store_memory=10 * 1024**3,  # 10GB for object store (reduced from ~32GB)
+    object_store_memory=5 * 1024**3,  # 5GB for object store (reduced from ~32GB)
     # This leaves more memory available for actor processes and computations
   )
   game = "draw_dominoes"
@@ -94,6 +98,8 @@ def main(_):
     "wandb_project": FLAGS.wandb_project,
     "wandb_entity": FLAGS.wandb_entity,
     "enable_wandb": FLAGS.enable_wandb,
+    "wandb_run_id": FLAGS.wandb_run_id,
+    "wandb_resume": FLAGS.wandb_resume,
     "calculate_exploitability": FLAGS.calculate_exploitability
   }
   learner = Learner.remote(**learner_kwargs)

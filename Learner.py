@@ -28,7 +28,7 @@ class NFSPPolicies(policy.Policy):
     # Build a full probability distribution over all legal actions.
     return {a: float(probs[a]) for a in legal_actions}
   
-@ray.remote(num_cpus=6, namespace="nfsp")
+@ray.remote(num_cpus=8, namespace="nfsp")
 class Learner:
     def __init__(self, **kwargs):
       self.game = kwargs["game"]
@@ -59,6 +59,8 @@ class Learner:
       self.wandb_project = kwargs.get("wandb_project", "nfsp-training")
       self.wandb_entity = kwargs.get("wandb_entity", None)
       self.enable_wandb = kwargs.get("enable_wandb", True)
+      self.wandb_run_id = kwargs.get("wandb_run_id", None)
+      self.wandb_resume = kwargs.get("wandb_resume", False)
       self.calculate_exploitability = kwargs.get("calculate_exploitability", True)
       
       # Prepare training configuration for wandb
@@ -68,7 +70,8 @@ class Learner:
       self.evaluator = Evaluator.options(name="evaluator", namespace="nfsp", lifetime="detached").remote(
             self.game, self.num_players, self.num_actions,
             self.wandb_project, self.wandb_entity, self.enable_wandb, 
-            self.calculate_exploitability, self.training_config)
+            self.calculate_exploitability, self.training_config,
+            self.wandb_run_id, self.wandb_resume)
       self.actors = []
       
     # ---------------------------------------------------------------------------
@@ -284,7 +287,7 @@ class Learner:
         # Send initial network parameters to actors
         self.distribute_updated_parameters()
         
-        print(f"Starting training from iteration {start_iteration + 1}/{self.num_iterations}")
+        print(f"Starting training from iteration {start_iteration}/{self.num_iterations}")
         
         def _sample_episode_policy():
             # Sample an episode policy *independently for each player* so that
@@ -355,12 +358,12 @@ class Learner:
                     training_losses=training_losses
                 )
                 eval_results = ray.get(eval_ref)
-                print(f"Iteration {iteration+1} - Evaluation Results:\n{eval_results}")
+                print(f"Iteration {iteration} - Evaluation Results:\n{eval_results}")
 
                 print("----------------------------------------------------")
             
-            if iteration % 1000 == 0:
-              print(f"Completed iteration {iteration + 1}/{self.num_iterations}")
+            if iteration % 200 == 0:
+              print(f"Completed iteration {iteration}/{self.num_iterations}")
         
         # Save final checkpoint
         print("Training completed! Saving final checkpoint...")
